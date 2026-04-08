@@ -6,59 +6,7 @@
     "name": "milla-jovovich"
   },
   "license": "MIT",
-  "hooks": {
-    "Stop": "hooks/mempal-stop-hook.sh",
-    "PreCompact": "hooks/mempal-precompact-hook.sh"
-  },
-  "skills": [
-    {
-      "name": "init",
-      "file": "skills/init/SKILL.md"
-    },
-    {
-      "name": "search",
-      "file": "skills/search/SKILL.md"
-    },
-    {
-      "name": "mine",
-      "file": "skills/mine/SKILL.md"
-    },
-    {
-      "name": "help",
-      "file": "skills/help/SKILL.md"
-    },
-    {
-      "name": "status",
-      "file": "skills/status/SKILL.md"
-    }
-  ],
-  "commands": [
-    {
-      "name": "mempalace:help",
-      "description": "Show MemPalace help — available tools, skills, architecture",
-      "skill": "help"
-    },
-    {
-      "name": "mempalace:init",
-      "description": "Set up MemPalace — install, configure MCP, onboard",
-      "skill": "init"
-    },
-    {
-      "name": "mempalace:search",
-      "description": "Search your memories across the palace",
-      "skill": "search"
-    },
-    {
-      "name": "mempalace:mine",
-      "description": "Mine projects and conversations into the palace",
-      "skill": "mine"
-    },
-    {
-      "name": "mempalace:status",
-      "description": "Show palace overview — wings, rooms, drawer counts",
-      "skill": "status"
-    }
-  ],
+  "skills": "./skills/",
   "mcp": {
     "mempalace": {
       "command": "python3",
@@ -77,8 +25,5 @@
     "palace",
     "search"
   ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/milla-jovovich/mempalace"
-  }
+  "repository": "https://github.com/milla-jovovich/mempalace"
 }
