@@ -1,6 +1,7 @@
 import os
 import tempfile
 import shutil
+from pathlib import Path
 
 import chromadb
 
@@ -41,12 +42,13 @@ def test_mine_convos_does_not_reprocess_short_files(capsys):
 
         # First run -- file is processed (sentinel written)
         mine_convos(tmpdir, palace_path, wing="test")
-        out1 = capsys.readouterr().out
+        capsys.readouterr()  # drain output
 
-        # Verify sentinel was written
+        # Verify sentinel was written (resolve path -- macOS /var -> /private/var)
+        resolved_file = str(Path(tmpdir).resolve() / "tiny.txt")
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_collection("mempalace_drawers")
-        assert file_already_mined(col, os.path.join(tmpdir, "tiny.txt"))
+        assert file_already_mined(col, resolved_file)
 
         # Second run -- file should be skipped
         mine_convos(tmpdir, palace_path, wing="test")
