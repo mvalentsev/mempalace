@@ -30,7 +30,7 @@ def normalize(filepath: str) -> str:
     except OSError as e:
         raise IOError(f"Could not read {filepath}: {e}")
     if file_size > 500 * 1024 * 1024:  # 500 MB safety limit
-        raise IOError(f"File too large ({file_size // (1024*1024)} MB): {filepath}")
+        raise IOError(f"File too large ({file_size // (1024 * 1024)} MB): {filepath}")
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
@@ -192,11 +192,7 @@ def _try_claude_ai_json(data) -> Optional[str]:
 
     # Privacy export: array of conversation objects, each containing its own
     # message list under "chat_messages" or "messages" (both variants seen in the wild).
-    if (
-        data
-        and isinstance(data[0], dict)
-        and ("chat_messages" in data[0] or "messages" in data[0])
-    ):
+    if data and isinstance(data[0], dict) and ("chat_messages" in data[0] or "messages" in data[0]):
         transcripts = []
         for convo in data:
             if not isinstance(convo, dict):
