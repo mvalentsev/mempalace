@@ -269,9 +269,7 @@ def test_mine_dry_run_with_tiny_file_no_crash():
         project_root = Path(tmpdir).resolve()
 
         # One normal file and one that falls below MIN_CHUNK_SIZE
-        write_file(
-            project_root / "good.py", "def main():\n    print('hello world')\n" * 20
-        )
+        write_file(project_root / "good.py", "def main():\n    print('hello world')\n" * 20)
         write_file(project_root / "tiny.txt", "x")
 
         with open(project_root / "mempalace.yaml", "w") as f:
