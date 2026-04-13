@@ -269,7 +269,11 @@ def _sanitize_optional_name(value: str = None, field_name: str = "name") -> str:
 
 
 def tool_status():
-    col = _get_collection()
+    # Use create=True only when a palace DB already exists on disk -- this
+    # bootstraps the ChromaDB collection on a valid-but-empty palace without
+    # accidentally creating a palace in a non-existent directory (#830).
+    db_exists = os.path.isfile(os.path.join(_config.palace_path, "chroma.sqlite3"))
+    col = _get_collection(create=db_exists)
     if not col:
         return _no_palace()
     count = col.count()
