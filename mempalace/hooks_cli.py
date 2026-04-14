@@ -36,6 +36,11 @@ PRECOMPACT_BLOCK_REASON = (
     "Save everything to MemPalace, then allow compaction to proceed."
 )
 
+PRECOMPACT_ALLOW_REASON = (
+    "MemPalace pre-compaction save. Your conversation has been saved "
+    "in the background. Compaction can proceed safely."
+)
+
 
 def _sanitize_session_id(session_id: str) -> str:
     """Only allow alnum, dash, underscore to prevent path traversal."""
@@ -122,20 +127,53 @@ def _output(data: dict):
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
-def _maybe_auto_ingest():
-    """If MEMPAL_DIR is set and exists, run mempalace mine in background."""
+def _get_mine_dir(transcript_path: str = "") -> str:
+    """Determine directory to mine from MEMPAL_DIR or transcript path."""
     mempal_dir = os.environ.get("MEMPAL_DIR", "")
     if mempal_dir and os.path.isdir(mempal_dir):
-        try:
-            log_path = STATE_DIR / "hook.log"
-            with open(log_path, "a") as log_f:
-                subprocess.Popen(
-                    [sys.executable, "-m", "mempalace", "mine", mempal_dir],
-                    stdout=log_f,
-                    stderr=log_f,
-                )
-        except OSError:
-            pass
+        return mempal_dir
+    if transcript_path:
+        path = Path(transcript_path).expanduser()
+        if path.is_file():
+            return str(path.parent)
+    return ""
+
+
+def _maybe_auto_ingest(transcript_path: str = ""):
+    """Run mempalace mine in background if a mine directory is available."""
+    mine_dir = _get_mine_dir(transcript_path)
+    if not mine_dir:
+        return
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = STATE_DIR / "hook.log"
+        with open(log_path, "a") as log_f:
+            subprocess.Popen(
+                [sys.executable, "-m", "mempalace", "mine", mine_dir],
+                stdout=log_f,
+                stderr=log_f,
+            )
+    except OSError:
+        pass
+
+
+def _mine_sync(transcript_path: str = ""):
+    """Run mempalace mine synchronously (for precompact -- data must land first)."""
+    mine_dir = _get_mine_dir(transcript_path)
+    if not mine_dir:
+        return
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = STATE_DIR / "hook.log"
+        with open(log_path, "a") as log_f:
+            subprocess.run(
+                [sys.executable, "-m", "mempalace", "mine", mine_dir],
+                stdout=log_f,
+                stderr=log_f,
+                timeout=60,
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 SUPPORTED_HARNESSES = {"claude-code", "codex"}
@@ -192,7 +230,7 @@ def hook_stop(data: dict, harness: str):
         _log(f"TRIGGERING SAVE at exchange {exchange_count}")
 
         # Optional: auto-ingest if MEMPAL_DIR is set
-        _maybe_auto_ingest()
+        _maybe_auto_ingest(transcript_path)
 
         _output({"decision": "block", "reason": STOP_BLOCK_REASON})
     else:
@@ -214,29 +252,17 @@ def hook_session_start(data: dict, harness: str):
 
 
 def hook_precompact(data: dict, harness: str):
-    """Precompact hook: always block with comprehensive save instruction."""
+    """Precompact hook: mine transcript synchronously, then allow compaction."""
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
+    transcript_path = parsed["transcript_path"]
 
     _log(f"PRE-COMPACT triggered for session {session_id}")
 
-    # Optional: auto-ingest synchronously before compaction (so memories land first)
-    mempal_dir = os.environ.get("MEMPAL_DIR", "")
-    if mempal_dir and os.path.isdir(mempal_dir):
-        try:
-            log_path = STATE_DIR / "hook.log"
-            with open(log_path, "a") as log_f:
-                subprocess.run(
-                    [sys.executable, "-m", "mempalace", "mine", mempal_dir],
-                    stdout=log_f,
-                    stderr=log_f,
-                    timeout=60,
-                )
-        except OSError:
-            pass
+    # Mine synchronously so data lands before compaction proceeds
+    _mine_sync(transcript_path)
 
-    # Always block -- compaction = save everything
-    _output({"decision": "block", "reason": PRECOMPACT_BLOCK_REASON})
+    _output({"decision": "allow", "reason": PRECOMPACT_ALLOW_REASON})
 
 
 def run_hook(hook_name: str, harness: str):

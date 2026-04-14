@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,8 +10,9 @@ import pytest
 from mempalace.hooks_cli import (
     SAVE_INTERVAL,
     STOP_BLOCK_REASON,
-    PRECOMPACT_BLOCK_REASON,
+    PRECOMPACT_ALLOW_REASON,
     _count_human_messages,
+    _get_mine_dir,
     _log,
     _maybe_auto_ingest,
     _parse_harness_input,
@@ -205,14 +207,14 @@ def test_session_start_passes_through(tmp_path):
 # --- hook_precompact ---
 
 
-def test_precompact_always_blocks(tmp_path):
+def test_precompact_allows(tmp_path):
     result = _capture_hook_output(
         hook_precompact,
         {"session_id": "test"},
         state_dir=tmp_path,
     )
-    assert result["decision"] == "block"
-    assert result["reason"] == PRECOMPACT_BLOCK_REASON
+    assert result["decision"] == "allow"
+    assert result["reason"] == PRECOMPACT_ALLOW_REASON
 
 
 # --- _log ---
@@ -238,7 +240,7 @@ def test_log_oserror_is_silenced(tmp_path):
 
 
 def test_maybe_auto_ingest_no_env(tmp_path):
-    """Without MEMPAL_DIR set, does nothing."""
+    """Without MEMPAL_DIR or transcript_path, does nothing."""
     with patch.dict("os.environ", {}, clear=True):
         with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
             _maybe_auto_ingest()  # should not raise
@@ -255,6 +257,17 @@ def test_maybe_auto_ingest_with_env(tmp_path):
                 mock_popen.assert_called_once()
 
 
+def test_maybe_auto_ingest_with_transcript(tmp_path):
+    """Falls back to transcript directory when MEMPAL_DIR is not set."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("")
+    with patch.dict("os.environ", {}, clear=True):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
+                _maybe_auto_ingest(str(transcript))
+                mock_popen.assert_called_once()
+
+
 def test_maybe_auto_ingest_oserror(tmp_path):
     """OSError during subprocess spawn is silenced."""
     mempal_dir = tmp_path / "project"
@@ -263,6 +276,33 @@ def test_maybe_auto_ingest_oserror(tmp_path):
         with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
             with patch("mempalace.hooks_cli.subprocess.Popen", side_effect=OSError("fail")):
                 _maybe_auto_ingest()  # should not raise
+
+
+# --- _get_mine_dir ---
+
+
+def test_get_mine_dir_mempal_dir(tmp_path):
+    """MEMPAL_DIR takes priority over transcript_path."""
+    mempal_dir = tmp_path / "project"
+    mempal_dir.mkdir()
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("")
+    with patch.dict("os.environ", {"MEMPAL_DIR": str(mempal_dir)}):
+        assert _get_mine_dir(str(transcript)) == str(mempal_dir)
+
+
+def test_get_mine_dir_transcript_fallback(tmp_path):
+    """Falls back to transcript parent dir when MEMPAL_DIR is not set."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("")
+    with patch.dict("os.environ", {}, clear=True):
+        assert _get_mine_dir(str(transcript)) == str(tmp_path)
+
+
+def test_get_mine_dir_empty():
+    """Returns empty string when nothing is available."""
+    with patch.dict("os.environ", {}, clear=True):
+        assert _get_mine_dir("") == ""
 
 
 # --- _parse_harness_input ---
@@ -333,7 +373,7 @@ def test_stop_hook_oserror_on_write(tmp_path):
 
 
 def test_precompact_with_mempal_dir(tmp_path):
-    """Precompact runs subprocess.run when MEMPAL_DIR is set."""
+    """Precompact runs subprocess.run (sync) when MEMPAL_DIR is set."""
     mempal_dir = tmp_path / "project"
     mempal_dir.mkdir()
     with patch.dict("os.environ", {"MEMPAL_DIR": str(mempal_dir)}):
@@ -343,7 +383,7 @@ def test_precompact_with_mempal_dir(tmp_path):
                 {"session_id": "test"},
                 state_dir=tmp_path,
             )
-    assert result["decision"] == "block"
+    assert result["decision"] == "allow"
     mock_run.assert_called_once()
 
 
@@ -358,7 +398,40 @@ def test_precompact_with_mempal_dir_oserror(tmp_path):
                 {"session_id": "test"},
                 state_dir=tmp_path,
             )
-    assert result["decision"] == "block"
+    assert result["decision"] == "allow"
+
+
+def test_precompact_with_timeout(tmp_path):
+    """Precompact handles TimeoutExpired gracefully -- still allows."""
+    mempal_dir = tmp_path / "project"
+    mempal_dir.mkdir()
+    with patch.dict("os.environ", {"MEMPAL_DIR": str(mempal_dir)}):
+        with patch(
+            "mempalace.hooks_cli.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="mine", timeout=60),
+        ):
+            result = _capture_hook_output(
+                hook_precompact, {"session_id": "test"}, state_dir=tmp_path
+            )
+    assert result["decision"] == "allow"
+
+
+def test_precompact_mines_transcript_dir(tmp_path, monkeypatch):
+    """Precompact mines transcript directory when no MEMPAL_DIR."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("")
+    monkeypatch.delenv("MEMPAL_DIR", raising=False)
+    with patch("mempalace.hooks_cli.subprocess.run") as mock_run:
+        result = _capture_hook_output(
+            hook_precompact,
+            {"session_id": "test", "transcript_path": str(transcript)},
+            state_dir=tmp_path,
+        )
+    assert result["decision"] == "allow"
+    mock_run.assert_called_once()
+    # Verify mine dir is the transcript's parent
+    call_args = mock_run.call_args[0][0]
+    assert str(tmp_path) in call_args[-1]
 
 
 # --- run_hook ---
@@ -401,7 +474,7 @@ def test_run_hook_dispatches_precompact(tmp_path):
                 run_hook("precompact", "claude-code")
     mock_output.assert_called_once()
     call_args = mock_output.call_args[0][0]
-    assert call_args["decision"] == "block"
+    assert call_args["decision"] == "allow"
 
 
 def test_run_hook_unknown_hook():
