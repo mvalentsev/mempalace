@@ -144,7 +144,6 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
     # 1. TRANSCRIPT_PATH (from Claude Code) — mine the directory it lives in
     # 2. MEMPAL_DIR (user-configured) — mine that directory
     # At least one should work. If neither is set, nothing mines.
-    PYTHON="$(command -v python3)"
     MINE_DIR=""
     if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
         MINE_DIR="$(dirname "$TRANSCRIPT_PATH")"
@@ -153,7 +152,7 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
         MINE_DIR="$MEMPAL_DIR"
     fi
     if [ -n "$MINE_DIR" ]; then
-        "$PYTHON" -m mempalace mine "$MINE_DIR" >> "$STATE_DIR/hook.log" 2>&1 &
+        mempalace mine "$MINE_DIR" >> "$STATE_DIR/hook.log" 2>&1 &
     fi
 
     # MEMPAL_VERBOSE toggle:
