@@ -9,11 +9,15 @@ weak closets (regex extraction on narrative content) can only help, never
 hide drawers the direct path would have found.
 """
 
+import functools
 import logging
 import math
 import re
 from pathlib import Path
+from typing import Optional
 
+from .config import MempalaceConfig
+from .i18n import get_stopwords
 from .palace import get_closets_collection, get_collection
 
 # Closet pointer line format: "topic|entities|→drawer_id_a,drawer_id_b"
@@ -45,9 +49,36 @@ def _first_or_empty(results, key: str) -> list:
     return outer[0] or []
 
 
-def _tokenize(text: str) -> list:
-    """Lowercase + strip to alphanumeric tokens of length ≥ 2."""
-    return _TOKEN_RE.findall(text.lower())
+def _tokenize(text: str, stop_words: frozenset = frozenset()) -> list:
+    """Lowercase + strip to alphanumeric tokens of length ≥ 2.
+
+    When ``stop_words`` is non-empty, filters tokens that match any entry.
+    The set is expected to already be lowercased so callers can share one
+    instance across query + document tokenization.
+    """
+    tokens = _TOKEN_RE.findall(text.lower())
+    if stop_words:
+        return [t for t in tokens if t not in stop_words]
+    return tokens
+
+
+@functools.lru_cache(maxsize=16)
+def _resolve_stop_words(lang: Optional[str]) -> frozenset:
+    """Return the BM25 stop-word set for ``lang`` or the configured default.
+
+    Config resolution is isolated here so ``search_memories`` stays under
+    ruff's mccabe complexity ceiling and so tests can monkeypatch a single
+    seam instead of env + file fixtures. Results are cached per-``lang`` so
+    the search hot path does not re-read ``config.json`` on every call —
+    16 slots is more than the count of shipped locales.
+    """
+    if lang is None:
+        try:
+            lang = MempalaceConfig().lang
+        except Exception:
+            logger.debug("lang resolution failed, defaulting to en", exc_info=True)
+            lang = "en"
+    return frozenset(get_stopwords(lang))
 
 
 def _bm25_scores(
@@ -55,6 +86,7 @@ def _bm25_scores(
     documents: list,
     k1: float = 1.5,
     b: float = 0.75,
+    stop_words: frozenset = frozenset(),
 ) -> list:
     """Compute Okapi-BM25 scores for ``query`` against each document.
 
@@ -72,11 +104,11 @@ def _bm25_scores(
     Returns a list of scores in the same order as ``documents``.
     """
     n_docs = len(documents)
-    query_terms = set(_tokenize(query))
+    query_terms = set(_tokenize(query, stop_words))
     if not query_terms or n_docs == 0:
         return [0.0] * n_docs
 
-    tokenized = [_tokenize(d) for d in documents]
+    tokenized = [_tokenize(d, stop_words) for d in documents]
     doc_lens = [len(toks) for toks in tokenized]
     if not any(doc_lens):
         return [0.0] * n_docs
@@ -114,6 +146,7 @@ def _hybrid_rank(
     query: str,
     vector_weight: float = 0.6,
     bm25_weight: float = 0.4,
+    stop_words: frozenset = frozenset(),
 ) -> list:
     """Re-rank ``results`` by a convex combination of vector similarity and BM25.
 
@@ -132,7 +165,7 @@ def _hybrid_rank(
         return results
 
     docs = [r.get("text", "") for r in results]
-    bm25_raw = _bm25_scores(query, docs)
+    bm25_raw = _bm25_scores(query, docs, stop_words=stop_words)
     max_bm25 = max(bm25_raw) if bm25_raw else 0.0
     bm25_norm = [s / max_bm25 for s in bm25_raw] if max_bm25 > 0 else [0.0] * len(bm25_raw)
 
@@ -363,6 +396,7 @@ def search_memories(
     room: str = None,
     n_results: int = 5,
     max_distance: float = 0.0,
+    lang: Optional[str] = None,
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -378,7 +412,12 @@ def search_memories(
             cosine distance (hnsw:space=cosine) — 0 = identical, 2 = opposite.
             Results with distance > this value are filtered out. A value of
             0.0 disables filtering. Typical useful range: 0.3–1.0.
+        lang: Locale code for BM25 stop-word filtering. When omitted, reads
+            ``MempalaceConfig().lang`` which resolves via env, config.json,
+            ``entity_languages[0]``, then falls back to English.
     """
+    stop_words = _resolve_stop_words(lang)
+
     try:
         drawers_col = get_collection(palace_path, create=False)
     except Exception as e:
@@ -524,7 +563,7 @@ def search_memories(
         indexed.sort(key=lambda p: p[0])
         ordered_docs = [d for _, d in indexed]
 
-        query_terms = set(_tokenize(query))
+        query_terms = set(_tokenize(query, stop_words))
         best_idx, best_score = 0, -1
         for idx, d in enumerate(ordered_docs):
             d_lower = d.lower()
@@ -546,7 +585,7 @@ def search_memories(
         h["total_drawers"] = len(ordered_docs)
 
     # BM25 hybrid re-rank within the final candidate set.
-    hits = _hybrid_rank(hits, query)
+    hits = _hybrid_rank(hits, query, stop_words=stop_words)
     for h in hits:
         h.pop("_sort_key", None)
         h.pop("_source_file_full", None)
