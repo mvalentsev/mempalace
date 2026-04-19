@@ -430,9 +430,12 @@ def search_memories(
             cosine distance (hnsw:space=cosine) — 0 = identical, 2 = opposite.
             Results with distance > this value are filtered out. A value of
             0.0 disables filtering. Typical useful range: 0.3–1.0.
-        lang: Locale code for BM25 stop-word filtering. When omitted, reads
-            ``MempalaceConfig().lang`` which resolves via env, config.json,
-            ``entity_languages[0]``, then falls back to English.
+        lang: Locale code for BM25 stop-word filtering (opt-in). When
+            omitted, reads ``MempalaceConfig().lang_explicit`` — returns an
+            empty set unless the user has set ``MEMPALACE_LANG`` /
+            ``MEMPAL_LANG`` or ``config.json["lang"]``. Palaces without an
+            explicit language skip filtering entirely, preserving pre-PR
+            byte-identical scoring.
     """
     stop_words = _resolve_stop_words(lang)
 
