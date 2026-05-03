@@ -187,9 +187,15 @@ def test_cmd_init_honors_palace_flag(tmp_path, monkeypatch):
     palace = tmp_path / "custom_palace"
 
     # Make sure no leftover env var from another test leaks in — we want to
-    # verify that --palace ALONE drives the resolution.
-    monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
-    monkeypatch.delenv("MEMPAL_PALACE_PATH", raising=False)
+    # verify that --palace ALONE drives the resolution. Prime monkeypatch's
+    # undo list with setenv first so that the env var ``cmd_init`` writes
+    # below is rolled back at teardown (``delenv(raising=False)`` on a
+    # missing key registers no undo entry, which would leak into the next
+    # test).
+    monkeypatch.setenv("MEMPALACE_PALACE_PATH", "")
+    monkeypatch.setenv("MEMPAL_PALACE_PATH", "")
+    monkeypatch.delenv("MEMPALACE_PALACE_PATH")
+    monkeypatch.delenv("MEMPAL_PALACE_PATH")
 
     args = argparse.Namespace(
         dir=str(project),
