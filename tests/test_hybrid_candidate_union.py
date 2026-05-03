@@ -113,6 +113,107 @@ class TestCandidateUnion:
         with pytest.raises(ValueError, match="candidate_strategy"):
             search_memories("anything", palace, n_results=5, candidate_strategy="bogus")
 
+    def test_invalid_strategy_raises_even_when_vector_disabled(self, tmp_path):
+        """Validation must happen before the ``vector_disabled`` early return —
+        invalid values must fail consistently regardless of routing."""
+        palace = str(tmp_path / "palace")
+        _seed_drawers(palace)
+        import pytest
+
+        with pytest.raises(ValueError, match="candidate_strategy"):
+            search_memories(
+                "anything",
+                palace,
+                n_results=5,
+                vector_disabled=True,
+                candidate_strategy="bogus",
+            )
+
+    def test_union_respects_n_results_limit(self, tmp_path):
+        """When the merged candidate set is larger than ``n_results``, the
+        result must be trimmed back to the requested size — the MCP
+        ``limit`` contract depends on this invariant."""
+        palace = str(tmp_path / "palace")
+        _seed_drawers(palace)
+        # 4-doc corpus, n_results=2 → union pool can grow to ~8 candidates,
+        # rerank reorders them, but final list must respect the cap.
+        result = search_memories(_NARRATIVE_QUERY, palace, n_results=2, candidate_strategy="union")
+        assert (
+            len(result["results"]) <= 2
+        ), f"union must trim to n_results=2; got {len(result['results'])} results"
+
+    def test_union_skipped_when_max_distance_set(self, tmp_path):
+        """``max_distance`` is a vector-distance threshold; BM25-only
+        candidates have ``distance=None`` and cannot satisfy it. Union
+        must not silently inject them when a strict threshold is set,
+        otherwise the existing ``max_distance`` guarantee regresses."""
+        palace = str(tmp_path / "palace")
+        _seed_drawers(palace)
+        # Sanity: without max_distance, union surfaces the BM25-strong doc.
+        unfiltered = search_memories(
+            _NARRATIVE_QUERY, palace, n_results=5, candidate_strategy="union"
+        )
+        assert "brand_voice_D4.md" in {h["source_file"] for h in unfiltered["results"]}
+
+        # With a tight max_distance, union must NOT inject BM25-only hits —
+        # every returned hit must have a real (non-None) distance.
+        filtered = search_memories(
+            _NARRATIVE_QUERY,
+            palace,
+            n_results=5,
+            candidate_strategy="union",
+            max_distance=0.5,
+        )
+        for h in filtered["results"]:
+            assert h.get("distance") is not None, (
+                f"union under max_distance must not inject BM25-only "
+                f"(distance=None) candidates; offending hit: {h}"
+            )
+            assert h["distance"] <= 0.5, f"hit violates max_distance=0.5: distance={h['distance']}"
+
+    def test_union_dedup_is_chunk_precise_not_basename(self, tmp_path):
+        """Two files with the same basename in different directories must
+        not collide — union must dedup on full path (or chunk-level key),
+        not on basename alone. Otherwise a BM25-strong README from one
+        directory silently shadows a BM25-strong README from another.
+        """
+        palace = str(tmp_path / "palace")
+        col = get_collection(palace, create=True)
+        col.upsert(
+            ids=["A_README", "B_README", "narrative"],
+            documents=[
+                # Both README files share the basename README.md but live
+                # in different directories. Each contains distinctive
+                # terminology a query might surface via BM25.
+                "PROJECT ALPHA: configuration for the Frobnitz subsystem. "
+                "Set FROBNITZ_TIMEOUT=30 to enable widget rotation.",
+                "PROJECT BETA: configuration for the Wibble subsystem. "
+                "Set WIBBLE_THRESHOLD=0.5 to enable signal smoothing.",
+                "Engineers occasionally chat about how the legacy "
+                "subsystems all need their config knobs tweaked.",
+            ],
+            metadatas=[
+                {"wing": "code", "room": "docs", "source_file": "alpha/README.md"},
+                {"wing": "code", "room": "docs", "source_file": "beta/README.md"},
+                {"wing": "code", "room": "docs", "source_file": "chat.md"},
+            ],
+        )
+        # Query that hits BM25 for BOTH READMEs (distinct vocab from each).
+        # Vector-only might pick the chat doc as semantically "closest";
+        # union must surface both READMEs without basename collision.
+        result = search_memories(
+            "FROBNITZ_TIMEOUT WIBBLE_THRESHOLD configuration",
+            palace,
+            n_results=5,
+            candidate_strategy="union",
+        )
+        sources = [h["source_file"] for h in result["results"]]
+        readme_count = sum(1 for s in sources if s == "README.md")
+        assert readme_count >= 2, (
+            f"union must surface both README.md files from different dirs "
+            f"(basename collision would drop one); got sources={sources}"
+        )
+
 
 class TestHybridRankTolerantOfMissingDistance:
     """``_hybrid_rank`` accepts ``distance=None`` — required for BM25-only
