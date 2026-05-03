@@ -310,8 +310,7 @@ def cmd_init(args):
                 )
         except LLMError as e:
             print(
-                f"  LLM init failed ({e}). "
-                f"Running heuristics-only — pass --no-llm to silence this."
+                f"  LLM init failed ({e}). Running heuristics-only — pass --no-llm to silence this."
             )
 
     # Pass 0: detect whether the corpus is AI-dialogue. Writes
@@ -902,7 +901,7 @@ def cmd_compress(args):
     # Store compressed versions (unless dry-run)
     if not args.dry_run:
         try:
-            comp_col = backend.get_or_create_collection(palace_path, "mempalace_compressed")
+            comp_col = backend.get_or_create_collection(palace_path, "mempalace_closets")
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
                 comp_meta["compression_ratio"] = round(stats["size_ratio"], 1)
@@ -913,7 +912,7 @@ def cmd_compress(args):
                     metadatas=[comp_meta],
                 )
             print(
-                f"  Stored {len(compressed_entries)} compressed drawers in 'mempalace_compressed' collection."
+                f"  Stored {len(compressed_entries)} compressed drawers in 'mempalace_closets' collection."
             )
         except Exception as e:
             print(f"  Error storing compressed drawers: {e}")
