@@ -943,16 +943,32 @@ def _reconfigure_stdio_utf8_on_windows():
     content piped in (`mempalace search ... < query.txt`) or piped out
     (`mempalace search "..." > out.txt`) when verbatim drawer text or
     wing/room names contain non-Latin characters.
+
+    Per-stream errors policy:
+      stdin  -- surrogateescape: malformed bytes from a redirected file
+                survive as lone surrogates instead of crashing the read.
+      stdout -- replace: ``mempalace search`` prints verbatim drawer
+                text. A drawer that round-tripped a filename through
+                surrogateescape can hold a lone surrogate, which would
+                otherwise raise ``UnicodeEncodeError`` mid-print and
+                lose the rest of the search result block.
+      stderr -- replace: same hazard for logger output that quotes
+                user-supplied path or content.
     """
     if sys.platform != "win32":
         return
-    for name in ("stdin", "stdout", "stderr"):
+    policies = (
+        ("stdin", "surrogateescape"),
+        ("stdout", "replace"),
+        ("stderr", "replace"),
+    )
+    for name, errors in policies:
         stream = getattr(sys, name, None)
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
         try:
-            reconfigure(encoding="utf-8", errors="strict")
+            reconfigure(encoding="utf-8", errors=errors)
         except Exception as exc:
             print(
                 f"WARNING: Could not reconfigure {name} to UTF-8: {exc}",

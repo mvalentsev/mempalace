@@ -1076,10 +1076,13 @@ def test_reconfigures_stdio_to_utf8_on_windows():
     ):
         _reconfigure_stdio_utf8_on_windows()
 
-    expected = {"encoding": "utf-8", "errors": "strict"}
-    assert stdin.reconfigure_calls == [expected]
-    assert stdout.reconfigure_calls == [expected]
-    assert stderr.reconfigure_calls == [expected]
+    # Per-stream errors policy: stdin survives bad bytes via
+    # surrogateescape so a redirected non-UTF-8 file does not crash
+    # the read; stdout/stderr use replace so a drawer carrying a
+    # round-tripped surrogate half does not crash mid-print.
+    assert stdin.reconfigure_calls == [{"encoding": "utf-8", "errors": "surrogateescape"}]
+    assert stdout.reconfigure_calls == [{"encoding": "utf-8", "errors": "replace"}]
+    assert stderr.reconfigure_calls == [{"encoding": "utf-8", "errors": "replace"}]
 
 
 def test_reconfigure_stdio_is_noop_off_windows():

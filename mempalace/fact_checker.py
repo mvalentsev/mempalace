@@ -309,18 +309,32 @@ def _reconfigure_stdio_utf8_on_windows():
     Without this, Python defaults stdio to the system ANSI codepage
     (cp1252/cp1251/cp950 depending on locale), which mojibakes
     non-ASCII fact text before pattern parsing sees it.
+
+    Per-stream errors policy mirrors the primary CLI helper in
+    ``mempalace/cli.py``:
+      stdin  -- surrogateescape: malformed input bytes survive as lone
+                surrogates instead of crashing the read.
+      stdout -- replace: extracted fact text can include surrogate
+                halves round-tripped from filenames; replace prevents
+                a UnicodeEncodeError mid-print.
+      stderr -- replace: same protection for warning lines.
     """
     import sys
 
     if sys.platform != "win32":
         return
-    for name in ("stdin", "stdout", "stderr"):
+    policies = (
+        ("stdin", "surrogateescape"),
+        ("stdout", "replace"),
+        ("stderr", "replace"),
+    )
+    for name, errors in policies:
         stream = getattr(sys, name, None)
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
         try:
-            reconfigure(encoding="utf-8", errors="strict")
+            reconfigure(encoding="utf-8", errors=errors)
         except Exception as exc:
             print(
                 f"WARNING: Could not reconfigure {name} to UTF-8: {exc}",
