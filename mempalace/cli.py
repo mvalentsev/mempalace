@@ -232,6 +232,13 @@ def cmd_init(args):
     from .project_scanner import discover_entities
     from .room_detector_local import detect_rooms_local
 
+    # Honor --palace (issue #1313): without this, init silently ignored the
+    # flag and always used ~/.mempalace. Mirror the env-var pattern used by
+    # mcp_server.py so every downstream read of ``cfg.palace_path`` (Pass 0,
+    # cfg.init(), the post-init mine) routes to the user-specified location.
+    if getattr(args, "palace", None):
+        os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(os.path.expanduser(args.palace))
+
     cfg = MempalaceConfig()
 
     # Resolve entity-detection languages: --lang overrides config.

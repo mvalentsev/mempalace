@@ -175,6 +175,55 @@ def test_cmd_init_normalizes_wing_name_for_topics_registry(mock_config_cls, tmp_
         assert mock_register.call_args.kwargs["wing"] == "my_cool_app"
 
 
+def test_cmd_init_honors_palace_flag(tmp_path, monkeypatch):
+    """Regression for #1313: ``cmd_init`` must honor ``--palace`` instead of
+    silently writing to ``~/.mempalace``. Mirrors the env-var pattern used
+    by ``cmd_mine`` / ``cmd_status`` / ``mcp_server`` so every downstream
+    read of ``cfg.palace_path`` (Pass 0, ``cfg.init()``, post-init mine)
+    routes to the user-specified location.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    palace = tmp_path / "custom_palace"
+
+    # Make sure no leftover env var from another test leaks in — we want to
+    # verify that --palace ALONE drives the resolution.
+    monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
+    monkeypatch.delenv("MEMPAL_PALACE_PATH", raising=False)
+
+    args = argparse.Namespace(
+        dir=str(project),
+        palace=str(palace),
+        yes=True,
+        auto_mine=False,
+    )
+
+    captured = {}
+
+    def fake_pass_zero(project_dir, palace_dir, llm_provider):
+        # Capture the palace_dir Pass 0 sees — this is the smoking-gun
+        # value for the bug. Pre-fix it was always ~/.mempalace.
+        captured["pass_zero_palace_dir"] = palace_dir
+        return None
+
+    with (
+        patch("mempalace.entity_detector.scan_for_detection", return_value=[]),
+        patch("mempalace.room_detector_local.detect_rooms_local"),
+        patch("mempalace.cli._run_pass_zero", side_effect=fake_pass_zero),
+        patch("mempalace.cli._maybe_run_mine_after_init"),
+    ):
+        cmd_init(args)
+
+    expected = str(palace)
+    # Pass 0 must have been handed the --palace location, not ~/.mempalace.
+    assert captured["pass_zero_palace_dir"] == expected
+    # And the env var must point at the custom palace so any downstream
+    # ``cfg.palace_path`` read in this process resolves correctly too.
+    import os
+
+    assert os.environ.get("MEMPALACE_PALACE_PATH") == os.path.abspath(expected)
+
+
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_init_with_entities_zero_total(mock_config_cls, tmp_path, capsys):
     """When entities detected but total is 0, prints 'No entities' message."""
