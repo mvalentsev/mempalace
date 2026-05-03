@@ -938,42 +938,17 @@ def cmd_compress(args):
 def _reconfigure_stdio_utf8_on_windows():
     """Decode stdio as UTF-8 on Windows for the primary `mempalace` CLI.
 
-    Without this, Python defaults stdio to the system ANSI codepage
-    (cp1252/cp1251/cp950 depending on locale). That mojibakes non-ASCII
-    content piped in (`mempalace search ... < query.txt`) or piped out
-    (`mempalace search "..." > out.txt`) when verbatim drawer text or
-    wing/room names contain non-Latin characters.
-
-    Per-stream errors policy:
-      stdin  -- surrogateescape: malformed bytes from a redirected file
-                survive as lone surrogates instead of crashing the read.
-      stdout -- replace: ``mempalace search`` prints verbatim drawer
-                text. A drawer that round-tripped a filename through
-                surrogateescape can hold a lone surrogate, which would
-                otherwise raise ``UnicodeEncodeError`` mid-print and
-                lose the rest of the search result block.
-      stderr -- replace: same hazard for logger output that quotes
-                user-supplied path or content.
+    Thin wrapper around the shared helper in ``mempalace._stdio``. The CLI
+    overrides stdout/stderr to ``replace`` because ``mempalace search``
+    prints verbatim drawer text that may carry surrogate halves
+    round-tripped from filenames -- ``strict`` would crash mid-print and
+    lose the rest of the search result block. stdin keeps the default
+    ``surrogateescape`` so a redirected non-UTF-8 file does not kill the
+    read on the first bad byte.
     """
-    if sys.platform != "win32":
-        return
-    policies = (
-        ("stdin", "surrogateescape"),
-        ("stdout", "replace"),
-        ("stderr", "replace"),
-    )
-    for name, errors in policies:
-        stream = getattr(sys, name, None)
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors=errors)
-        except Exception as exc:
-            print(
-                f"WARNING: Could not reconfigure {name} to UTF-8: {exc}",
-                file=sys.stderr,
-            )
+    from ._stdio import reconfigure_stdio_utf8_on_windows
+
+    reconfigure_stdio_utf8_on_windows(stdout_errors="replace", stderr_errors="replace")
 
 
 def main():
