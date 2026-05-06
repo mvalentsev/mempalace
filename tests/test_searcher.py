@@ -135,10 +135,12 @@ class TestSearchMemories:
         drawers_col = MagicMock()
         drawers_col.query.return_value = {
             "documents": [["doc-a", "doc-b"]],
-            "metadatas": [[
-                {"source_file": "a.md", "wing": "w", "room": "r", "chunk_index": 0},
-                {"source_file": "b.md", "wing": "w", "room": "r", "chunk_index": 0},
-            ]],
+            "metadatas": [
+                [
+                    {"source_file": "a.md", "wing": "w", "room": "r", "chunk_index": 0},
+                    {"source_file": "b.md", "wing": "w", "room": "r", "chunk_index": 0},
+                ]
+            ],
             "distances": [[0.08, 0.35]],
             "ids": [["d-a", "d-b"]],
         }
@@ -164,9 +166,9 @@ class TestSearchMemories:
 
         # Invariants on every hit.
         for h in hits:
-            assert 0.0 <= h["similarity"] <= 1.0, (
-                f"similarity out of range: {h['similarity']} for {h['source_file']}"
-            )
+            assert (
+                0.0 <= h["similarity"] <= 1.0
+            ), f"similarity out of range: {h['similarity']} for {h['source_file']}"
             assert 0.0 <= h["effective_distance"] <= 2.0, (
                 f"effective_distance out of range: {h['effective_distance']} "
                 f"for {h['source_file']}"
