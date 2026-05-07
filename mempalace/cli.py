@@ -662,6 +662,8 @@ def cmd_repair(args):
         _rebuild_collection_via_temp,
         check_extraction_safety,
         maybe_repair_poisoned_max_seq_id_before_rebuild,
+        print_sqlite_integrity_abort,
+        sqlite_integrity_errors,
     )
 
     config = MempalaceConfig()
@@ -742,6 +744,18 @@ def cmd_repair(args):
     if not contains_palace_database(palace_path):
         print(f"\n No palace database found at {db_path}")
         return
+
+    # Run the SQLite integrity preflight before any chromadb client open.
+    # ChromaDB's rust binding raises pyo3_runtime.PanicException on a
+    # malformed page, which is not a regular Exception subclass and
+    # propagates past the try/except below — the user gets a 30-line
+    # stack trace instead of the friendly abort message. Run quick_check
+    # here so we can surface the clear recovery instructions and exit
+    # cleanly before chromadb's compactor touches the disk.
+    sqlite_errors = sqlite_integrity_errors(palace_path)
+    if sqlite_errors:
+        print_sqlite_integrity_abort(palace_path, sqlite_errors)
+        sys.exit(1)
 
     preflight = maybe_repair_poisoned_max_seq_id_before_rebuild(
         palace_path,

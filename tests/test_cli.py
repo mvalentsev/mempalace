@@ -2,6 +2,7 @@
 
 import argparse
 import shlex
+import sqlite3
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -774,7 +775,7 @@ def test_cmd_repair_requires_palace_database(mock_config_cls, tmp_path, capsys):
 def test_cmd_repair_error_reading(mock_config_cls, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    (palace_dir / "chroma.sqlite3").write_text("db")
+    sqlite3.connect(str(palace_dir / "chroma.sqlite3")).close()
     mock_config_cls.return_value.palace_path = str(palace_dir)
     mock_config_cls.return_value.collection_name = "mempalace_drawers"
     args = argparse.Namespace(palace=None)
@@ -790,7 +791,7 @@ def test_cmd_repair_error_reading(mock_config_cls, tmp_path, capsys):
 def test_cmd_repair_zero_drawers(mock_config_cls, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    (palace_dir / "chroma.sqlite3").write_text("db")
+    sqlite3.connect(str(palace_dir / "chroma.sqlite3")).close()
     mock_config_cls.return_value.palace_path = str(palace_dir)
     mock_config_cls.return_value.collection_name = "mempalace_drawers"
     args = argparse.Namespace(palace=None)
@@ -807,7 +808,7 @@ def test_cmd_repair_zero_drawers(mock_config_cls, tmp_path, capsys):
 def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    (palace_dir / "chroma.sqlite3").write_text("db")
+    sqlite3.connect(str(palace_dir / "chroma.sqlite3")).close()
     mock_config_cls.return_value.palace_path = str(palace_dir)
     mock_config_cls.return_value.collection_name = "mempalace_drawers"
     args = argparse.Namespace(palace=None, yes=True)
@@ -843,7 +844,7 @@ def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
 def test_cmd_repair_uses_configured_collection(mock_config_cls, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    (palace_dir / "chroma.sqlite3").write_text("db")
+    sqlite3.connect(str(palace_dir / "chroma.sqlite3")).close()
     mock_config_cls.return_value.palace_path = str(palace_dir)
     mock_config_cls.return_value.collection_name = "custom_drawers"
     args = argparse.Namespace(palace=None, yes=True)
@@ -882,7 +883,7 @@ def test_cmd_repair_uses_configured_collection(mock_config_cls, tmp_path, capsys
 def test_cmd_repair_restores_backup_on_live_rebuild_failure(mock_config_cls, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    (palace_dir / "chroma.sqlite3").write_text("db")
+    sqlite3.connect(str(palace_dir / "chroma.sqlite3")).close()
     mock_config_cls.return_value.palace_path = str(palace_dir)
     mock_config_cls.return_value.collection_name = "mempalace_drawers"
     args = argparse.Namespace(palace=None, yes=True)
@@ -916,7 +917,7 @@ def test_cmd_repair_restores_backup_on_live_rebuild_failure(mock_config_cls, tmp
 def test_cmd_repair_aborts_without_confirmation(mock_config_cls, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    (palace_dir / "chroma.sqlite3").write_text("db")
+    sqlite3.connect(str(palace_dir / "chroma.sqlite3")).close()
     mock_config_cls.return_value.palace_path = str(palace_dir)
     mock_config_cls.return_value.collection_name = "mempalace_drawers"
     args = argparse.Namespace(palace=None)

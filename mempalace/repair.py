@@ -633,6 +633,17 @@ def rebuild_index(
     print(f"{'=' * 55}\n")
     print(f" Palace: {palace_path}")
 
+    # Run the SQLite integrity preflight before any chromadb client open.
+    # ChromaDB's rust binding raises pyo3_runtime.PanicException (which is
+    # not a regular Exception subclass) on a malformed page, propagating
+    # past the try/except around get_collection below. Catching the
+    # corruption here lets us surface the clear recovery instructions and
+    # exit cleanly before chromadb's compactor touches the disk.
+    sqlite_errors = sqlite_integrity_errors(palace_path)
+    if sqlite_errors:
+        print_sqlite_integrity_abort(palace_path, sqlite_errors)
+        return
+
     preflight = maybe_repair_poisoned_max_seq_id_before_rebuild(
         palace_path,
         assume_yes=True,
@@ -674,11 +685,6 @@ def rebuild_index(
         )
     except TruncationDetected as e:
         print(e.message)
-        return
-
-    sqlite_errors = sqlite_integrity_errors(palace_path)
-    if sqlite_errors:
-        print_sqlite_integrity_abort(palace_path, sqlite_errors)
         return
 
     # Back up ONLY the SQLite database, not the bloated HNSW files
