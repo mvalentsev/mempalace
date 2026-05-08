@@ -560,6 +560,78 @@ def test_maybe_auto_ingest_skips_when_mine_running(tmp_path):
                     mock_popen.assert_not_called()
 
 
+# --- _detached_popen_kwargs ---
+
+
+def test_detached_popen_kwargs_posix(monkeypatch):
+    """On POSIX, kwargs include start_new_session so the child detaches."""
+    from mempalace.hooks_cli import _detached_popen_kwargs
+
+    monkeypatch.setattr("mempalace.hooks_cli.os.name", "posix")
+    kwargs = _detached_popen_kwargs()
+    assert kwargs.get("start_new_session") is True
+    assert kwargs.get("stdin") is subprocess.DEVNULL
+    assert kwargs.get("close_fds") is True
+    assert "creationflags" not in kwargs
+
+
+def test_detached_popen_kwargs_windows(monkeypatch):
+    """On Windows, kwargs include creationflags that fully detach the child.
+
+    Without these, the parent hook hangs at session end on Windows because
+    the child's inherited stdout/stderr handles keep the parent's exit
+    blocked (#1268 root cause for the Python hook path).
+    """
+    from mempalace.hooks_cli import _detached_popen_kwargs
+
+    monkeypatch.setattr("mempalace.hooks_cli.os.name", "nt")
+    # Simulate Windows-only Popen flag constants. Patch on the imported
+    # subprocess module within hooks_cli so getattr() picks them up.
+    monkeypatch.setattr(
+        "mempalace.hooks_cli.subprocess.DETACHED_PROCESS", 0x00000008, raising=False
+    )
+    monkeypatch.setattr(
+        "mempalace.hooks_cli.subprocess.CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False
+    )
+    kwargs = _detached_popen_kwargs()
+    assert kwargs.get("stdin") is subprocess.DEVNULL
+    assert kwargs.get("close_fds") is True
+    flags = kwargs.get("creationflags", 0)
+    assert flags & 0x00000008, "DETACHED_PROCESS must be set"
+    assert flags & 0x00000200, "CREATE_NEW_PROCESS_GROUP must be set"
+
+
+def test_spawn_mine_uses_detached_kwargs(tmp_path):
+    """_spawn_mine forwards detached kwargs so the hook can exit cleanly."""
+    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+        with patch("mempalace.hooks_cli._MINE_PID_FILE", tmp_path / "mine.pid"):
+            with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
+                mock_popen.return_value.pid = 9999
+                from mempalace.hooks_cli import _spawn_mine
+
+                _spawn_mine(["mempalace", "mine", "/tmp/x"])
+                kwargs = mock_popen.call_args.kwargs
+                # The exact key set varies by platform; assert on the
+                # shared invariants that protect against the Windows hang.
+                assert kwargs.get("stdin") is subprocess.DEVNULL
+                assert kwargs.get("close_fds") is True
+
+
+def test_ingest_transcript_uses_detached_kwargs(tmp_path):
+    """_ingest_transcript spawns the convos mine with detach kwargs."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("x" * 200)  # > 100 byte gate
+    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+        with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
+            from mempalace.hooks_cli import _ingest_transcript
+
+            _ingest_transcript(str(transcript))
+            assert mock_popen.called
+            kwargs = mock_popen.call_args.kwargs
+            assert kwargs.get("stdin") is subprocess.DEVNULL
+            assert kwargs.get("close_fds") is True
+
+
 # --- _mine_already_running ---
 
 

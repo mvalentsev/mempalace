@@ -19,6 +19,27 @@ STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 PALACE_ROOT = Path.home() / ".mempalace"
 
 
+def _detached_popen_kwargs() -> dict:
+    """Kwargs that fully detach a Popen child so the hook process can exit.
+
+    Without these, Windows holds the parent open until the child closes the
+    inherited stdout/stderr handles — manifesting as "Stop hook hangs" at
+    session end (#1268). On POSIX the parent can already exit (orphan
+    reparents to init), but ``start_new_session`` makes the boundary
+    explicit so signals to the hook don't propagate to the background mine.
+    """
+    kwargs: dict = {"stdin": subprocess.DEVNULL, "close_fds": True}
+    if os.name == "nt":
+        flags = 0
+        for name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_BREAKAWAY_FROM_JOB"):
+            flags |= getattr(subprocess, name, 0)
+        if flags:
+            kwargs["creationflags"] = flags
+    else:
+        kwargs["start_new_session"] = True
+    return kwargs
+
+
 def _palace_root_exists() -> bool:
     """User-removable kill-switch.
 
@@ -285,7 +306,7 @@ def _spawn_mine(cmd: list) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     log_path = STATE_DIR / "hook.log"
     with open(log_path, "a") as log_f:
-        proc = subprocess.Popen(cmd, stdout=log_f, stderr=log_f)
+        proc = subprocess.Popen(cmd, stdout=log_f, stderr=log_f, **_detached_popen_kwargs())
     _MINE_PID_FILE.write_text(str(proc.pid))
 
 
@@ -350,6 +371,7 @@ def _desktop_toast(body: str, title: str = "MemPalace"):
             ["notify-send", "--app-name=MemPalace", "--icon=brain", title, body],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **_detached_popen_kwargs(),
         )
     except OSError:
         pass
@@ -513,6 +535,7 @@ def _ingest_transcript(transcript_path: str):
                 ],
                 stdout=log_f,
                 stderr=log_f,
+                **_detached_popen_kwargs(),
             )
         _log(f"Transcript ingest started: {path.name}")
     except OSError:
