@@ -14,6 +14,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 SAVE_INTERVAL = 15
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
@@ -343,7 +344,7 @@ def _mine_already_running(cmd: list[str]) -> bool:
     return _pid_alive(int(recorded))
 
 
-def _claim_mine_slot(cmd: list[str]) -> Path | None:
+def _claim_mine_slot(cmd: list[str]) -> Optional[Path]:
     """Atomically reserve the per-target PID slot for ``cmd``.
 
     Returns the slot path on success, or ``None`` if the target is
