@@ -376,10 +376,17 @@ def _format_lock_holder(content: str) -> str:
     return f"PID {pid}"
 
 
+# Byte 0 of the lock file is reserved as the OS lock sentinel.
+# Holder identity is written from byte 1 onward so contenders can read
+# the identity without colliding with byte 0 (Windows msvcrt.locking
+# blocks both reads and writes on the locked byte).
+_LOCK_SENTINEL_BYTES = 1
+
+
 def _read_lock_holder(lock_file) -> str:
     """Read the prior holder's identity from the lock-file body, best-effort."""
     try:
-        lock_file.seek(0)
+        lock_file.seek(_LOCK_SENTINEL_BYTES)
         content = lock_file.read().strip()
     except OSError:
         return "another writer (identity not recorded)"
@@ -389,11 +396,16 @@ def _read_lock_holder(lock_file) -> str:
 
 
 def _write_lock_holder(lock_file) -> None:
-    """Record this process's identity in the lock-file body. Best-effort."""
+    """Record this process's identity in the lock-file body. Best-effort.
+
+    Writes from byte 1 onward; byte 0 is the lock sentinel and must not
+    be touched after acquire (truncating it on Windows can interact
+    badly with the active byte-range lock).
+    """
     try:
         ident = f"{os.getpid()} {' '.join(sys.argv[:3])}".strip()
-        lock_file.seek(0)
-        lock_file.truncate()
+        lock_file.seek(_LOCK_SENTINEL_BYTES)
+        lock_file.truncate(_LOCK_SENTINEL_BYTES + len(ident.encode("utf-8")))
         lock_file.write(ident)
         lock_file.flush()
     except OSError:
@@ -443,12 +455,27 @@ def mine_palace_lock(palace_path: str):
         yield
         return
 
-    # "a+" preserves the prior holder's identity recorded inside the file so
-    # a failed acquire can name who is holding the lock (#1264). "w" mode
-    # would have truncated the file before we could read it.
-    lf = open(lock_path, "a+")
+    # Ensure the file exists, then open r+ so we can both read the prior
+    # holder's identity (for failure diagnostics) and write our own. "w"
+    # truncates and erases the prior holder. "a+" puts the position at EOF,
+    # which on Windows breaks ``msvcrt.locking`` (it locks 1 byte at the
+    # *current* position, so two contenders end up locking different bytes
+    # and silently both acquire — observed as Windows-CI lock test
+    # failures during #1264 development).
+    if not os.path.exists(lock_path):
+        # Touch atomically: O_CREAT|O_EXCL would fail if a concurrent
+        # contender just created it, which is fine — we proceed to open.
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            pass
+    lf = open(lock_path, "r+")
     acquired = False
     try:
+        # Lock byte 0 explicitly. msvcrt.locking is byte-position dependent;
+        # fcntl.flock is whole-file but the seek is harmless there.
+        lf.seek(0)
         if os.name == "nt":
             import msvcrt
 
@@ -486,6 +513,8 @@ def mine_palace_lock(palace_path: str):
                 if os.name == "nt":
                     import msvcrt
 
+                    # Match the lock region: byte 0.
+                    lf.seek(0)
                     msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
