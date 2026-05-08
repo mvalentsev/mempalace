@@ -42,6 +42,16 @@ def _reset_mcp_cache():
         try:
             from mempalace import mcp_server
 
+            for kg in list(getattr(mcp_server, "_kg_by_path", {}).values()):
+                close = getattr(kg, "close", None)
+                if close is not None:
+                    try:
+                        close()
+                    except Exception:
+                        pass
+            if hasattr(mcp_server, "_kg_by_path"):
+                mcp_server._kg_by_path.clear()
+
             mcp_server._client_cache = None
             mcp_server._collection_cache = None
         except (ImportError, AttributeError):

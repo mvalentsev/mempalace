@@ -81,20 +81,6 @@ def _temporal_end_key(value: Optional[str]) -> Optional[str]:
     return value
 
 
-def _triple_valid_at(valid_from: Optional[str], valid_to: Optional[str], as_of: str) -> bool:
-    as_of_key = _temporal_start_key(as_of)
-    valid_from_key = _temporal_start_key(valid_from)
-    valid_to_key = _temporal_end_key(valid_to)
-
-    if valid_from_key is not None and valid_from_key > as_of_key:
-        return False
-
-    if valid_to_key is not None and valid_to_key < as_of_key:
-        return False
-
-    return True
-
-
 def _sql_temporal_start_expr(column: str) -> str:
     """SQLite expression for comparing valid_from-style temporal values."""
 
@@ -229,15 +215,6 @@ class KnowledgeGraph:
         """Close the SQLite connection when leaving a context manager block."""
         self.close()
         return False
-
-    def __del__(self):
-        """Best-effort cleanup for callers/tests that forget to call close()."""
-        try:
-            self.close()
-        except Exception:
-            # Destructors must never raise, especially during interpreter
-            # shutdown when module globals may already be partially torn down.
-            pass
 
     def _entity_id(self, name: str) -> str:
         return name.lower().replace(" ", "_").replace("'", "")

@@ -93,14 +93,16 @@ def sanitize_kg_value(value: str, field_name: str = "value") -> str:
 # Accepted:
 #   YYYY-MM-DD
 #   YYYY-MM-DDTHH:MM:SSZ
+#   YYYY-MM-DDTHH:MM:SS+00:00  (normalized to ...Z)
 #
 # Rejected:
-#   partial dates, naive datetimes, timezone offsets, fractional seconds,
-#   and SQLite-style space-separated datetimes.
+#   partial dates, naive datetimes, non-UTC timezone offsets, fractional
+#   seconds, and SQLite-style space-separated datetimes.
 _ISO_DATE_RE = re.compile(r"^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$")
 
 _ISO_UTC_DATETIME_RE = re.compile(
-    r"^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])" r"T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\dZ$"
+    r"^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+    r"T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:Z|\+00:00)$"
 )
 
 
@@ -127,6 +129,7 @@ def sanitize_iso_temporal(value, field_name: str = "date"):
 
     - ``YYYY-MM-DD``
     - ``YYYY-MM-DDTHH:MM:SSZ``
+    - ``YYYY-MM-DDTHH:MM:SS+00:00`` normalized to ``...Z``
 
     Partial dates are rejected because KG queries compare TEXT temporal values.
     Non-canonical datetime forms are rejected because mixed temporal string
@@ -147,6 +150,9 @@ def sanitize_iso_temporal(value, field_name: str = "date"):
             f"{field_name}={value!r} is not a valid ISO-8601 date or UTC datetime "
             "(expected YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)"
         ) from None
+
+    if value.endswith("+00:00"):
+        value = f"{value[:-6]}Z"
 
     return value
 

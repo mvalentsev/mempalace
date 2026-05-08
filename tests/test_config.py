@@ -341,3 +341,7 @@ def test_iso_temporal_rejects_invalid_calendar_date():
 def test_iso_temporal_error_names_field():
     with pytest.raises(ValueError, match="as_of"):
         sanitize_iso_temporal("2026-05-06T14:23", "as_of")
+
+
+def test_iso_temporal_normalizes_plus_zero_offset_to_z():
+    assert sanitize_iso_temporal("2026-05-06T14:23:00+00:00") == "2026-05-06T14:23:00Z"
