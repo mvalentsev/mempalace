@@ -137,28 +137,26 @@ def _p(sorted_values: list[float], pct: int) -> float:
 # ── VRAM measurement ─────────────────────────────────────────────────────
 
 
-def vram_resident_mb(model_tag: str) -> Optional[int]:
-    """Resident VRAM for a loaded model, read from `ollama ps`. Returns None
-    if the model isn't loaded or `ollama ps` fails."""
+def vram_resident_mb(
+    model_tag: str, endpoint: str = "http://localhost:11434", timeout: int = 5
+) -> Optional[int]:
+    """Resident VRAM for a loaded model, read from Ollama's /api/ps endpoint.
+
+    Returns None if the model isn't loaded or the endpoint is unreachable.
+    Uses the HTTP API rather than `ollama ps` since the CLI's --format flag
+    is missing in older Ollama versions (verified against 0.23.2).
+    """
     try:
-        result = subprocess.run(
-            ["ollama", "ps", "--format", "json"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        with urlopen(f"{endpoint}/api/ps", timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except (URLError, HTTPError, OSError, json.JSONDecodeError):
         return None
-    if result.returncode != 0:
-        return None
-    for line in result.stdout.splitlines():
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
+    for model in data.get("models", []) or []:
+        if not isinstance(model, dict):
             continue
-        name = entry.get("name") or entry.get("model") or ""
-        if name == model_tag or name.startswith(model_tag.split(":")[0]):
-            size = entry.get("size_vram") or entry.get("size") or 0
+        name = model.get("name") or model.get("model") or ""
+        if name == model_tag:
+            size = model.get("size_vram") or model.get("size") or 0
             return int(size / (1024 * 1024)) if size else None
     return None
 
