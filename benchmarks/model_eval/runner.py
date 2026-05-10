@@ -64,9 +64,16 @@ def load_jsonl(path: Path) -> list[dict]:
 def _classify_with_timing(
     provider, system: str, user: str, json_mode: bool
 ) -> tuple[Optional[LLMResponse], TimingSample, Optional[str]]:
+    """Run one classify call. Always disables thinking on hybrid models.
+
+    MemPalace classification tasks (room, entity, memory) never benefit
+    from extended reasoning. Forcing think=False keeps hybrid Qwen 3
+    models in fast-instruct mode, gives pure-instruct models a no-op,
+    and ensures the benchmark measures the real production code path.
+    """
     t0 = time.perf_counter()
     try:
-        response = provider.classify(system=system, user=user, json_mode=json_mode)
+        response = provider.classify(system=system, user=user, json_mode=json_mode, think=False)
     except LLMError as e:
         return None, TimingSample(0, 0, 0, 0, 0), str(e)
     elapsed = time.perf_counter() - t0
@@ -220,7 +227,7 @@ def run(
         try:
             sys_p, user_p, json_mode = _build_prompt(task, mode, s0, l0)
             for _ in range(warmup):
-                provider.classify(system=sys_p, user=user_p, json_mode=json_mode)
+                provider.classify(system=sys_p, user=user_p, json_mode=json_mode, think=False)
         except LLMError as e:
             return Result(
                 model_tag=model_tag, task=task, mode=mode,

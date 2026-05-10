@@ -28,14 +28,12 @@ candidates:
     tier: 1
     notes: "Higher precision comparator for the q4_K_M baseline."
 
-  - tag: qwen3:4b-thinking-2507-q4_K_M
-    family: qwen3
-    size_b: 4.0
-    variant: reasoning
-    quantization: q4_K_M
-    expected_vram_mb: 2500
-    tier: 1
-    notes: "Direct test: does the reasoning variant help or hurt classification?"
+  # Pure reasoning variants are excluded by policy. MemPalace
+  # classification tasks always run with thinking disabled
+  # (see benchmarks/model_eval/runner.py and the project memory
+  # "no reasoning models for classification"). To benchmark a
+  # hybrid model, use its base tag and the runner forces
+  # think=False on every call.
 
   - tag: qwen2.5:3b-instruct-q4_K_M
     family: qwen2.5
