@@ -12,6 +12,8 @@ def _strip_leaked_pythonpath() -> None:
     # and remove sys.path entries the interpreter populated from it.
     # Comparison normalizes case + separators so Windows paths and
     # trailing-separator quirks do not slip through string equality.
+    # The empty-string CWD marker on sys.path is preserved regardless,
+    # so PYTHONPATH=. does not collapse the implicit current directory.
     leaked = os.environ.pop("PYTHONPATH", None)
     if not leaked:
         return
@@ -19,8 +21,8 @@ def _strip_leaked_pythonpath() -> None:
     def _norm(path: str) -> str:
         return os.path.normcase(os.path.normpath(path))
 
-    leaked_entries = {_norm(p.strip()) for p in leaked.split(os.pathsep) if p.strip()}
-    sys.path[:] = [p for p in sys.path if _norm(p) not in leaked_entries]
+    leaked_entries = {_norm(p) for p in leaked.split(os.pathsep) if p}
+    sys.path[:] = [p for p in sys.path if not p or _norm(p) not in leaked_entries]
 
 
 _strip_leaked_pythonpath()
