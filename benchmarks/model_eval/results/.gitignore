@@ -1,3 +1,8 @@
 *.csv
 !.gitignore
 !README.md
+# Committed baselines (per-machine, dated). Add explicit exceptions
+# when a particular run is worth attaching to history (analysis report
+# committed alongside, etc.). Future runs on other machines remain
+# gitignored by default.
+!2026-05-10-z690-ex-glacial.csv
