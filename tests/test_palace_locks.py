@@ -23,12 +23,15 @@ from mempalace.palace import (
 
 
 def _get_mp_context():
-    """Return a clean multiprocessing context for palace-lock tests.
+    """Always use ``spawn`` — ``fork`` deadlocks under modern Python.
 
-    Always use ``spawn`` so child processes do not inherit the parent's open
-    file descriptors, flock state, SQLite handles, or Chroma/MCP module state.
-    This is slower than ``fork`` but much safer for the full test suite on
-    Linux/macOS, and it matches the behavior Windows already used.
+    The parent (pytest + chromadb + onnxruntime) is multi-threaded by the time
+    these tests run. ``fork`` snapshots that state into the child without the
+    threads that hold the locks, which Python 3.13 explicitly warns about and
+    which deadlocks the CI runners. macOS additionally forbids
+    fork-without-exec via CoreFoundation. ``spawn`` re-imports the package in
+    the child (slower, but safe) and inherits ``os.environ`` — including the
+    monkeypatched ``HOME`` — which is all these lock-file tests need.
     """
     return multiprocessing.get_context("spawn")
 
@@ -194,9 +197,9 @@ def test_reentrant_same_thread_passes_through(tmp_path, monkeypatch):
         child = ctx.Process(target=_try_acquire_expect_busy, args=(palace, result_q))
         try:
             child.start()
-            assert result_q.get(timeout=10) == "busy", (
-                "outer lock should still be held by parent after inner re-entrant exit"
-            )
+            assert (
+                result_q.get(timeout=10) == "busy"
+            ), "outer lock should still be held by parent after inner re-entrant exit"
             child.join(timeout=5)
             assert child.exitcode == 0
         finally:
@@ -262,9 +265,9 @@ def test_lock_failure_message_names_holder(tmp_path, monkeypatch):
                 pytest.fail("second acquire of same palace should have raised")
 
         msg = str(excinfo.value)
-        assert f"PID {holder_pid}" in msg, (
-            f"lock-failure message must name the holder PID; got: {msg!r}"
-        )
+        assert (
+            f"PID {holder_pid}" in msg
+        ), f"lock-failure message must name the holder PID; got: {msg!r}"
     finally:
         open(release, "w").close()
         holder.join(timeout=5)
