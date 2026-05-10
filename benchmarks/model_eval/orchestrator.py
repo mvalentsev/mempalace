@@ -67,18 +67,22 @@ def load_candidates(path: Path, tier: str) -> list[dict]:
     candidates = data.get("candidates", [])
     if tier == "all":
         return candidates
+    if tier == "cloud":
+        return [c for c in candidates if c.get("tier") == "cloud" or c.get("cloud")]
+    if tier == "local":
+        return [c for c in candidates if c.get("tier") != "cloud" and not c.get("cloud")]
+    if tier.startswith("tier<="):
+        try:
+            n = int(tier.split("<=")[1])
+        except (ValueError, IndexError):
+            return []
+        return [c for c in candidates if isinstance(c.get("tier"), int) and c["tier"] <= n]
     if tier.startswith("tier"):
         try:
             n = int(tier[4:])
         except ValueError:
             return []
         return [c for c in candidates if c.get("tier") == n]
-    if tier.startswith("tier<="):
-        try:
-            n = int(tier.split("<=")[1])
-        except (ValueError, IndexError):
-            return []
-        return [c for c in candidates if c.get("tier", 99) <= n]
     return [c for c in candidates if c.get("tag") == tier]
 
 

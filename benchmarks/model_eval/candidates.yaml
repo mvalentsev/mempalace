@@ -153,3 +153,59 @@ candidates:
     expected_vram_mb: 8100
     tier: 3
     notes: "Full-precision ceiling for the leader. Quality target."
+
+  # ── Cloud tier: Ollama-hosted reference and ceiling models ──────────
+  # Cloud models run on Ollama's servers, not locally. No local VRAM
+  # cost. Latency includes network round-trip. Used as accuracy ceiling
+  # to size the gap between local-best and what a 100x bigger model can
+  # do. Inclusion in benchmarks does not imply production use; the
+  # privacy and cost trade-offs make local models the default.
+  - tag: gpt-oss:20b-cloud
+    family: gpt-oss
+    size_b: 20.0
+    variant: instruct
+    quantization: cloud
+    expected_vram_mb: 0
+    tier: cloud
+    cloud: true
+    notes: "Smaller cloud reference. Faster + cheaper than the 120B."
+
+  - tag: gpt-oss:120b-cloud
+    family: gpt-oss
+    size_b: 120.0
+    variant: instruct
+    quantization: cloud
+    expected_vram_mb: 0
+    tier: cloud
+    cloud: true
+    notes: "Mid-tier cloud reference."
+
+  - tag: qwen3-coder:480b-cloud
+    family: qwen3-coder
+    size_b: 480.0
+    variant: coder-tuned
+    quantization: cloud
+    expected_vram_mb: 0
+    tier: cloud
+    cloud: true
+    notes: "Code-tuned variant. May behave differently on natural-language classification."
+
+  - tag: deepseek-v3.1:671b-cloud
+    family: deepseek
+    size_b: 671.0
+    variant: instruct
+    quantization: cloud
+    expected_vram_mb: 0
+    tier: cloud
+    cloud: true
+    notes: "Large general-purpose cloud reference."
+
+  - tag: kimi-k2:1t-cloud
+    family: kimi
+    size_b: 1000.0
+    variant: instruct
+    quantization: cloud
+    expected_vram_mb: 0
+    tier: cloud
+    cloud: true
+    notes: "Ceiling. Trillion-parameter MoE. Reserved for ceiling/tiebreaker use, not routine reference."

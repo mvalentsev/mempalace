@@ -98,3 +98,4 @@
 {"id": "rc_098", "closed_set_label": "other", "preferred_open_label": "lease-vs-buy"}
 {"id": "rc_099", "closed_set_label": "daily-logs", "preferred_open_label": "month-end-close"}
 {"id": "rc_100", "closed_set_label": "general", "preferred_open_label": "expense-vs-capitalize"}
+{"id": "rc_101", "closed_set_label": "daily-logs", "preferred_open_label": "project-exploration"}

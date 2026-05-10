@@ -98,3 +98,4 @@
 {"id": "rc_098", "rooms": ["about", "projects/cashflow-models", "projects/tax-prep", "skills/double-entry", "skills/depreciation-rules", "general"]}
 {"id": "rc_099", "rooms": ["about", "projects/invoice-parsing", "projects/tax-prep", "skills/double-entry", "skills/depreciation-rules", "daily-logs", "general"]}
 {"id": "rc_100", "rooms": ["about", "projects/invoice-parsing", "projects/tax-prep", "skills/double-entry", "skills/ifrs", "general"]}
+{"id": "rc_101", "rooms": ["about", "projects/distributed-tracing", "projects/parser-combinators", "skills/rust", "skills/ocaml", "daily-logs", "general"]}
