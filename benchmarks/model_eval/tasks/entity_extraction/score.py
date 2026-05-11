@@ -1,8 +1,8 @@
 """Entity extraction scoring: F1 over (name, type) pairs.
 
 Strict matching: predicted (name, type) must exactly equal a ground-truth
-(name, type) pair to count as true positive. Case-insensitive on name,
-case-sensitive on type. Names are normalized for whitespace.
+(name, type) pair to count as true positive. Case-insensitive on both
+name and type. Names are normalized for whitespace.
 """
 from __future__ import annotations
 

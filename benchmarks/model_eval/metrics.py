@@ -308,7 +308,7 @@ def gather_host_info() -> HostInfo:
     silently rather than aborting the benchmark."""
     info = HostInfo()
 
-    info.hostname = _run(["hostname"]) or ""
+    info.hostname = (_run(["hostname"]) or "").strip()
 
     cpuinfo = _read_file("/proc/cpuinfo") or ""
     for line in cpuinfo.splitlines():

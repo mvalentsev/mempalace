@@ -5,20 +5,20 @@ Synthetic, hand-curated evaluation datasets for testing small (≤4B parameter) 
 - **Synthetic only.** No real-person names, no real organizations, no real PII.
 - **Public-safe.** Intended to be committed to the public MemPalace open-source repository.
 - **Generated 2026-05-10.**
-- **210 samples** total across four tasks.
+- **211 samples** total across four tasks (100 synthetic + 1 real-format-flavored sample in room_classification).
 
 ## Tasks
 
 | Task | Samples | Purpose |
 |---|---|---|
-| `room_classification/` | 100 | Given a session summary and a room list, pick the right room (or `"other"`). Tests the closed-set room-routing path used at filing time. |
+| `room_classification/` | 101 | Given a session summary and a room list, pick the right room (or `"other"`). Tests the closed-set room-routing path used at filing time. 100 synthetic + 1 real-format-flavored (rc_101). |
 | `entity_extraction/` | 50 | Given a conversation excerpt, extract typed entities (person / project / place / organization). Tests the entity detector that feeds the knowledge graph. |
 | `memory_extraction/` | 40 | Given a snippet, extract memory-worthy items (decision / preference / fact / opinion / commitment). Tests the layer-promotion heuristic. |
 | `calibration/` | 20 | Sentence-type classification (question / command / statement / exclamation / greeting). A trivially-easy baseline used to detect a broken model load before more meaningful evals run. |
 
 ## The five fictional personae
 
-The 100 room-classification samples are split 20-per-agent across these synthetic agents. Each agent has a fixed room taxonomy; per-sample room lists are drawn as 5-10 room subsets that always include `general`.
+The 100 synthetic room-classification samples are split 20-per-agent across these synthetic agents (rc_101 is a separate real-format-flavored sample assigned to Solas). Each agent has a fixed room taxonomy; per-sample room lists are drawn as 5-10 room subsets that always include `general`.
 
 ### 1. Aria — research assistant (she/her)
 
@@ -52,7 +52,7 @@ Rooms: `about`, `projects/invoice-parsing`, `projects/tax-prep`, `projects/cashf
 
 ## Distribution stats
 
-### `room_classification/` (100 samples)
+### `room_classification/` (101 samples)
 
 | Metric | Value |
 |---|---|

@@ -24,7 +24,7 @@ from typing import Optional
 
 
 def load_rows(path: Path) -> list[dict]:
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f))
 
 
@@ -324,7 +324,7 @@ def main():
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        with open(args.output, "w") as f:
+        with open(args.output, "w", encoding="utf-8", newline="\n") as f:
             f.write(report)
         print(f"Wrote {args.output}")
     else:

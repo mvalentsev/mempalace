@@ -4,7 +4,7 @@ Usage:
     python -m benchmarks.model_eval.orchestrator \\
         --candidates tier1 \\
         --tasks all \\
-        --dataset-dir tests/fixtures/mempalace_bench \\
+        --dataset-dir benchmarks/model_eval/datasets \\
         --output benchmarks/model_eval/results/$(date -u +%Y-%m-%d)-$(hostname).csv
 
 The matrix per default:
@@ -166,36 +166,46 @@ def main():
     i = 0
     start = time.time()
 
-    for candidate in candidates:
-        tag = candidate["tag"]
-        for task, mode in task_modes:
-            i += 1
-            print(f"[{i}/{total}] {tag}  {task}  {mode}", flush=True)
-            try:
-                result = run(
-                    model_tag=tag,
-                    task=task,
-                    mode=mode,
-                    dataset_dir=args.dataset_dir,
-                    endpoint=args.endpoint,
-                    warmup=args.warmup,
-                    n_samples=args.n,
-                )
-            except Exception as e:
-                if not args.continue_on_error:
-                    raise
-                print(f"  ERROR: {e}", file=sys.stderr)
-                continue
-            row = result_to_row(result)
-            rows.append(row)
-            print(f"  acc={row['accuracy']}  e2e_p50={row['e2e_p50_ms']}ms  vram={row['vram_resident_mb']}", flush=True)
+    # Open the CSV once, write header, and flush after each row so a
+    # crash or Ctrl-C preserves partial progress. Long matrix runs (60+
+    # min for the local tier) make this important.
+    with open(args.output, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+        f.flush()
 
-    write_csv(args.output, rows)
+        for candidate in candidates:
+            tag = candidate["tag"]
+            for task, mode in task_modes:
+                i += 1
+                print(f"[{i}/{total}] {tag}  {task}  {mode}", flush=True)
+                try:
+                    result = run(
+                        model_tag=tag,
+                        task=task,
+                        mode=mode,
+                        dataset_dir=args.dataset_dir,
+                        endpoint=args.endpoint,
+                        warmup=args.warmup,
+                        n_samples=args.n,
+                    )
+                except Exception as e:
+                    if not args.continue_on_error:
+                        raise
+                    print(f"  ERROR: {e}", file=sys.stderr)
+                    continue
+                row = result_to_row(result)
+                rows.append(row)
+                writer.writerow(row)
+                f.flush()
+                print(f"  acc={row['accuracy']}  e2e_p50={row['e2e_p50_ms']}ms  vram={row['vram_resident_mb']}", flush=True)
+
     elapsed = time.time() - start
     print(f"\nDone in {elapsed/60:.1f}min. Wrote {len(rows)} rows to {args.output}")
 
 
 def write_csv(path: Path, rows: list[dict]):
+    """Batch-write helper, kept for callers that already have all rows in memory."""
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         writer.writeheader()

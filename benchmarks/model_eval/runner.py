@@ -5,7 +5,7 @@ Usage:
         --model qwen3:4b-instruct-2507-q4_K_M \\
         --task room_classification \\
         --mode closed \\
-        --dataset-dir tests/fixtures/mempalace_bench
+        --dataset-dir benchmarks/model_eval/datasets
 
 Designed to be called by orchestrator.py for matrix runs, but standalone
 runnable for one-off debugging.
@@ -261,7 +261,7 @@ def run(
             errors.append(f"score error: {e}")
 
     peak_vram = poller.stop()
-    resident_vram = vram_resident_mb(model_tag)
+    resident_vram = vram_resident_mb(model_tag, endpoint=endpoint)
 
     accuracy, extras = _aggregate_accuracy(task, mode, scores)
     if errors:

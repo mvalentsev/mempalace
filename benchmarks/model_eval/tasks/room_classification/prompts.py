@@ -8,7 +8,7 @@ from __future__ import annotations
 
 CLOSED_SYSTEM = """You are a room classifier for an AI agent's memory palace. Given a session excerpt and a list of rooms, choose the best-fitting room.
 
-Respond with EXACTLY one room slug from the list, or "other" if no room fits well. No explanation, no punctuation, no quotes."""
+Respond with EXACTLY one room slug from the list, copied verbatim (including any "/" or "-" characters), or the literal word "other" if no room fits well. No explanation, no quotes, no extra text."""
 
 
 OPEN_SYSTEM = """You are a room classifier for an AI agent's memory palace. Given a session excerpt and the agent's identity, INVENT a short room slug that captures the session's topic.
