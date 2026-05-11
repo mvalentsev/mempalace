@@ -198,9 +198,29 @@ candidates:
     expected_vram_mb: 0
     tier: cloud
     cloud: true
-    notes: "Large general-purpose cloud reference."
+    notes: "Older DeepSeek generation. Kept for historical comparison."
 
-  - tag: kimi-k2:1t-cloud
+  - tag: deepseek-v4-flash:cloud
+    family: deepseek
+    size_b: 284.0
+    variant: instruct
+    quantization: cloud
+    expected_vram_mb: 0
+    tier: cloud
+    cloud: true
+    notes: "DeepSeek V4 Flash MoE — 284B total, 13B activated. Newer generation, optimized for speed."
+
+  - tag: deepseek-v4-pro:cloud
+    family: deepseek
+    size_b: 671.0
+    variant: instruct
+    quantization: cloud
+    expected_vram_mb: 0
+    tier: cloud
+    cloud: true
+    notes: "DeepSeek V4 Pro. 1M context, multiple reasoning modes."
+
+  - tag: kimi-k2.6:cloud
     family: kimi
     size_b: 1000.0
     variant: instruct
@@ -208,4 +228,4 @@ candidates:
     expected_vram_mb: 0
     tier: cloud
     cloud: true
-    notes: "Ceiling. Trillion-parameter MoE. Reserved for ceiling/tiebreaker use, not routine reference."
+    notes: "Kimi K2.6 — current Moonshot release. Replaces kimi-k2:1t-cloud which returned HTTP 500 on the first run."
