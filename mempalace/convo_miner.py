@@ -296,6 +296,7 @@ def scan_convos(convo_dir: str) -> list:
             if filepath.suffix.lower() in CONVO_EXTENSIONS:
                 # Skip symlinks and oversized files
                 if filepath.is_symlink():
+                    print(f"  SKIP: {filepath.name} (symlink)")
                     continue
                 try:
                     if filepath.stat().st_size > MAX_FILE_SIZE:

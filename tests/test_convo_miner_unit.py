@@ -115,6 +115,24 @@ class TestScanConvos:
         files = scan_convos(str(tmp_path))
         assert files == []
 
+    def test_scan_logs_skipped_symlinks(self, tmp_path, capsys):
+        real_target = tmp_path / "outside" / "real.txt"
+        real_target.parent.mkdir()
+        real_target.write_text("real content", encoding="utf-8")
+        link_root = tmp_path / "link_root"
+        link_root.mkdir()
+        (link_root / "link.txt").symlink_to(real_target)
+        (link_root / "regular.txt").write_text("regular content", encoding="utf-8")
+
+        files = scan_convos(str(link_root))
+
+        names = {f.name for f in files}
+        assert "link.txt" not in names
+        assert "regular.txt" in names
+        out = capsys.readouterr().out
+        assert out.count("SKIP:") == 1
+        assert "link.txt" in out
+
 
 class TestFileChunksLocked:
     def test_uses_bounded_upsert_batches(self, monkeypatch):

@@ -1008,6 +1008,7 @@ def scan_project(
                     continue
             # Skip symlinks — prevents following links to /dev/urandom, etc.
             if filepath.is_symlink():
+                print(f"  SKIP: {filepath.name} (symlink)")
                 continue
             # Skip files exceeding size limit
             try:

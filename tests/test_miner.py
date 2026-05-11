@@ -253,6 +253,25 @@ def test_scan_project_skip_dirs_still_apply_without_override():
         shutil.rmtree(tmpdir)
 
 
+def test_scan_project_logs_skipped_symlinks(tmp_path, capsys):
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    real_target = tmp_path / "outside" / "real.md"
+    real_target.parent.mkdir()
+    real_target.write_text("real content\n" * 5, encoding="utf-8")
+    (project_root / "link.md").symlink_to(real_target)
+    (project_root / "regular.md").write_text("regular content\n" * 5, encoding="utf-8")
+
+    files = scan_project(str(project_root))
+
+    names = {f.name for f in files}
+    assert "link.md" not in names
+    assert "regular.md" in names
+    out = capsys.readouterr().out
+    assert out.count("SKIP:") == 1
+    assert "link.md" in out
+
+
 def test_entity_metadata_finds_cyrillic_names(monkeypatch):
     """Entity extraction must find non-Latin names when entity_languages includes the locale."""
     import mempalace.palace as palace_mod
