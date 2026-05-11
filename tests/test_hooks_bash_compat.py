@@ -11,7 +11,7 @@ These tests cover:
 2. Behavioral parse contract (session_id reaches the log, not 'unknown').
 3. The fail-loud guard: fires only when the parser sentinel is missing,
    never on a legitimately empty/unicode/literal-'unknown' session_id.
-4. The guard's disk discipline (bounded dump, overwrite-not-append).
+4. The guard's disk discipline (bounded dump, overwrite-not-append, 0600).
 """
 
 from __future__ import annotations
@@ -28,6 +28,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SAVE_HOOK = REPO_ROOT / "hooks" / "mempal_save_hook.sh"
 PRECOMPACT_HOOK = REPO_ROOT / "hooks" / "mempal_precompact_hook.sh"
 
+# Re-used by every parametrize decorator that runs the same test against
+# both hooks. ``ids=`` keeps pytest output readable (`...[save_hook]`
+# rather than the default `hook0`/`hook1`).
+_BOTH_HOOKS = pytest.mark.parametrize(
+    "hook",
+    [SAVE_HOOK, PRECOMPACT_HOOK],
+    ids=["save_hook", "precompact_hook"],
+)
+
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="bash hook scripts are POSIX-only")
 
 
@@ -37,11 +46,27 @@ def _hook_src_no_comments(hook: Path) -> str:
     )
 
 
-def _run_hook(hook: Path, stdin: str, home: Path) -> tuple[int, str]:
+def _run_hook(
+    hook: Path,
+    stdin: str,
+    home: Path,
+    *,
+    expected_rc: int = 0,
+    extra_env: dict | None = None,
+) -> tuple[str, str]:
+    """Run a hook with a controlled environment and assert its exit code.
+
+    Returns ``(stdout, stderr)``. On unexpected exit the assertion message
+    surfaces the captured stderr so CI failures are not silent (the hook
+    writes nothing useful to stdout on error, all diagnostics go to
+    stderr or hook.log).
+    """
     env = {
         "HOME": str(home),
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
     }
+    if extra_env:
+        env.update(extra_env)
     p = subprocess.run(
         ["bash", str(hook)],
         input=stdin,
@@ -50,31 +75,41 @@ def _run_hook(hook: Path, stdin: str, home: Path) -> tuple[int, str]:
         env=env,
         timeout=30,
     )
-    return p.returncode, p.stdout
+    assert p.returncode == expected_rc, (
+        f"{hook.name} exited {p.returncode} (expected {expected_rc}); "
+        f"stderr={p.stderr!r}; stdout={p.stdout!r}"
+    )
+    return p.stdout, p.stderr
 
 
 class TestNoBash4OnlyBuiltins:
-    """Source-level regression: mapfile/readarray unavailable on macOS bash 3.2."""
+    """Source-level regression: bash 4.0 array-read builtins are unavailable on macOS bash 3.2."""
 
-    @pytest.mark.parametrize("hook", [SAVE_HOOK, PRECOMPACT_HOOK])
+    @_BOTH_HOOKS
     def test_no_mapfile(self, hook):
         code = _hook_src_no_comments(hook)
-        assert "mapfile" not in code, (
-            f"{hook.name} uses mapfile, unavailable on macOS /bin/bash 3.2 (#1440)"
-        )
-        assert "readarray" not in code, (
-            f"{hook.name} uses readarray, unavailable on macOS /bin/bash 3.2 (#1440)"
-        )
+        assert (
+            "mapfile" not in code
+        ), f"{hook.name} uses mapfile, unavailable on macOS /bin/bash 3.2 (#1440)"
+        assert (
+            "readarray" not in code
+        ), f"{hook.name} uses readarray, unavailable on macOS /bin/bash 3.2 (#1440)"
 
-    @pytest.mark.parametrize("hook", [SAVE_HOOK, PRECOMPACT_HOOK])
+    @_BOTH_HOOKS
     def test_sed_extraction_present(self, hook):
-        src = hook.read_text()
+        # Strip ``#`` line comments before counting so the assertion fails
+        # if all live ``sed -n 'Np'`` calls are deleted but the explanatory
+        # comments above the parse block (which mention ``sed -n 'Np'``
+        # several times in prose) are left behind — otherwise the test
+        # would false-pass on a regression that swapped the extraction
+        # method back to ``mapfile`` while keeping the old commentary.
+        src = _hook_src_no_comments(hook)
         # Each hook reads at least two values via ``sed -n 'Np'`` (sentinel + session_id).
-        assert src.count("sed -n '") >= 2, (
-            f"{hook.name} must use sed -n 'Np' for POSIX-portable line extraction"
-        )
+        assert (
+            src.count("sed -n '") >= 2
+        ), f"{hook.name} must use sed -n 'Np' for POSIX-portable line extraction"
 
-    @pytest.mark.parametrize("hook", [SAVE_HOOK, PRECOMPACT_HOOK])
+    @_BOTH_HOOKS
     def test_bash_syntax_clean(self, hook):
         p = subprocess.run(
             ["bash", "-n", str(hook)],
@@ -88,14 +123,13 @@ class TestSessionIdExtraction:
     """Hook must parse session_id from valid JSON, not fall back to 'unknown'."""
 
     def test_save_hook_extracts_session_id(self, tmp_path):
-        rc, out = _run_hook(
+        out, _ = _run_hook(
             SAVE_HOOK,
             json.dumps(
                 {"session_id": "abc12345", "stop_hook_active": False, "transcript_path": ""}
             ),
             tmp_path,
         )
-        assert rc == 0
         # Stdout must be valid JSON; Claude Code parses it. A regression that
         # leaks debug output here would silently break the harness contract.
         assert json.loads(out) == {}, f"hook stdout must be valid JSON, got: {out!r}"
@@ -106,24 +140,25 @@ class TestSessionIdExtraction:
         assert "WARN: input parse failed" not in log
         state_dir = tmp_path / ".mempalace" / "hook_state"
         assert not (state_dir / "last_input.log").exists()
-        assert not (state_dir / "last_python_err.log").exists(), (
-            "successful parse must leave no last_python_err.log behind"
-        )
+        assert not (
+            state_dir / "last_python_err.log"
+        ).exists(), "successful parse must leave no last_python_err.log behind"
 
     def test_precompact_hook_extracts_session_id(self, tmp_path):
-        rc, out = _run_hook(
+        out, _ = _run_hook(
             PRECOMPACT_HOOK,
             json.dumps({"session_id": "abc12345", "transcript_path": ""}),
             tmp_path,
         )
-        assert rc == 0
         assert json.loads(out) == {}, f"hook stdout must be valid JSON, got: {out!r}"
         log = (tmp_path / ".mempalace" / "hook_state" / "hook.log").read_text()
         assert "PRE-COMPACT triggered for session abc12345" in log
         assert "WARN: input parse failed" not in log
         state_dir = tmp_path / ".mempalace" / "hook_state"
         assert not (state_dir / "last_input.log").exists()
-        assert not (state_dir / "last_python_err.log").exists()
+        assert not (
+            state_dir / "last_python_err.log"
+        ).exists(), "successful parse must leave no last_python_err.log behind"
 
 
 class TestFailLoudGuard:
@@ -132,80 +167,92 @@ class TestFailLoudGuard:
     user-private. The guard must NOT fire on legitimately empty inputs
     or on sanitizer-stripped session_ids (#1440)."""
 
-    @pytest.mark.parametrize("hook", [SAVE_HOOK, PRECOMPACT_HOOK])
+    @_BOTH_HOOKS
     def test_malformed_input_logs_warning_and_dumps_input(self, hook, tmp_path):
-        rc, _ = _run_hook(hook, "not-json garbage", tmp_path)
-        assert rc == 0
+        _run_hook(hook, "not-json garbage", tmp_path)
         state_dir = tmp_path / ".mempalace" / "hook_state"
         log = (state_dir / "hook.log").read_text()
         last_input = (state_dir / "last_input.log").read_text()
         assert "WARN: input parse failed (sentinel missing)" in log
         assert "not-json garbage" in last_input
 
-    @pytest.mark.parametrize("hook", [SAVE_HOOK, PRECOMPACT_HOOK])
+    @_BOTH_HOOKS
     def test_empty_stdin_does_not_dump_or_warn(self, hook, tmp_path):
         """Empty stdin is a legitimate state (e.g. a hook re-fire on Stop
         with no message body). The guard's ``[ -n "$INPUT" ]`` short-circuit
         must hold so nothing is written to last_input.log."""
-        rc, _ = _run_hook(hook, "", tmp_path)
-        assert rc == 0
+        _run_hook(hook, "", tmp_path)
         state_dir = tmp_path / ".mempalace" / "hook_state"
         assert not (state_dir / "last_input.log").exists()
         log_path = state_dir / "hook.log"
         if log_path.exists():
             assert "WARN: input parse failed" not in log_path.read_text()
 
-    def test_unicode_session_id_does_not_trip_guard(self, tmp_path):
+    @_BOTH_HOOKS
+    def test_unicode_session_id_does_not_trip_guard(self, hook, tmp_path):
         """A session_id with non-ASCII characters (Cyrillic, CJK, emoji)
         is stripped by the sanitizer to '', defaults to 'unknown'. The
-        sentinel still printed, so the guard must skip and NOT spam disk."""
-        rc, _ = _run_hook(
-            SAVE_HOOK,
+        sentinel still printed, so the guard must skip and NOT spam disk.
+        Parametrized over both hooks: each has its own inline Python
+        parser and its own sanitizer regex, so a copy-paste regression
+        in only one would otherwise be invisible. The precompact parser
+        ignores the ``stop_hook_active`` key, so the same payload works
+        for both."""
+        _run_hook(
+            hook,
             json.dumps({"session_id": "сессия", "stop_hook_active": False, "transcript_path": ""}),
             tmp_path,
         )
-        assert rc == 0
         state_dir = tmp_path / ".mempalace" / "hook_state"
-        assert not (state_dir / "last_input.log").exists(), (
-            "unicode-only session_id sanitized to empty must NOT trip the guard"
-        )
+        assert not (
+            state_dir / "last_input.log"
+        ).exists(), "unicode-only session_id sanitized to empty must NOT trip the guard"
 
-    def test_literal_unknown_session_id_does_not_trip_guard(self, tmp_path):
+    @_BOTH_HOOKS
+    def test_literal_unknown_session_id_does_not_trip_guard(self, hook, tmp_path):
         """A user who literally passes session_id='unknown' is parsing
         cleanly; the sentinel-based guard must distinguish that from a
-        crash and skip the dump."""
-        rc, _ = _run_hook(
-            SAVE_HOOK,
+        crash and skip the dump. Parametrized over both hooks for the
+        same reason as the unicode test: the sentinel logic is duplicated
+        between the two parsers."""
+        _run_hook(
+            hook,
             json.dumps({"session_id": "unknown", "stop_hook_active": False, "transcript_path": ""}),
             tmp_path,
         )
-        assert rc == 0
         state_dir = tmp_path / ".mempalace" / "hook_state"
-        assert not (state_dir / "last_input.log").exists(), (
-            "literal session_id='unknown' must NOT trip the guard"
-        )
+        assert not (
+            state_dir / "last_input.log"
+        ).exists(), "literal session_id='unknown' must NOT trip the guard"
 
-    def test_dump_is_bounded_and_overwritten(self, tmp_path):
+    @_BOTH_HOOKS
+    def test_dump_is_bounded_and_overwritten(self, hook, tmp_path):
         """The dump caps at exactly 4096 bytes and overwrites on each
         failure so a repeating misconfiguration cannot grow the file
-        unbounded."""
+        unbounded. Both payloads here are intentionally not-valid-JSON so
+        the guard fires on each call — the overwrite contract is what
+        is being tested, not the validation logic. Parametrized over
+        both hooks because each hook has its own ``head -c 4096 > ...``
+        line — a future edit that flips one to ``>>`` would not be caught
+        by a save-only test."""
         # 4097 bytes: one over the cap, proves the cutoff fires at exactly
         # 4096 (a regression that silently shrinks the cap to e.g. 1024
         # would slip past a looser ``<= 4096`` check).
         big_payload = "x" * 4097
-        rc, _ = _run_hook(SAVE_HOOK, big_payload, tmp_path)
-        assert rc == 0
+        _run_hook(hook, big_payload, tmp_path)
         last_input = tmp_path / ".mempalace" / "hook_state" / "last_input.log"
-        assert last_input.stat().st_size == 4096, (
-            f"cap must be exactly 4096 bytes; got {last_input.stat().st_size}"
-        )
-        # Second failure with a smaller payload overwrites the first; the
-        # file shrinks instead of accumulating.
-        rc, _ = _run_hook(SAVE_HOOK, "tiny", tmp_path)
-        assert rc == 0
+        assert (
+            last_input.stat().st_size == 4096
+        ), f"cap must be exactly 4096 bytes; got {last_input.stat().st_size}"
+        # Second failure with a smaller payload (also not valid JSON, so the
+        # guard fires) overwrites the first; the file shrinks instead of
+        # accumulating.
+        _run_hook(hook, "tiny", tmp_path)
+        assert last_input.exists(), "second guard fire must produce a file, not skip the write"
         assert last_input.read_text() == "tiny", "dump must overwrite on each failure, not append"
 
-    def test_dump_cap_holds_under_utf8_locale(self, tmp_path):
+    @_BOTH_HOOKS
+    def test_dump_cap_holds_under_utf8_locale(self, hook, tmp_path):
         """Under a UTF-8 locale, a multibyte payload of 2000 CJK chars =
         6000 bytes would slip a character-counted substring (`${var:0:N}`)
         past the 4096-byte cap. The hook uses ``head -c`` precisely so
@@ -215,23 +262,14 @@ class TestFailLoudGuard:
         # bash falls back to the byte-based C locale gracefully;
         # ``en_US.UTF-8`` would silently degrade to no-op on minimal CI
         # images (Alpine, distroless) where that locale is not generated.
-        env = {
-            "HOME": str(tmp_path),
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
-        }
         # 2000 copies of U+4E2D (3 bytes each in UTF-8) = 6000 bytes.
         big_payload = "中" * 2000
-        p = subprocess.run(
-            ["bash", str(SAVE_HOOK)],
-            input=big_payload,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=30,
+        _run_hook(
+            hook,
+            big_payload,
+            tmp_path,
+            extra_env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
         )
-        assert p.returncode == 0
         last_input = tmp_path / ".mempalace" / "hook_state" / "last_input.log"
         size = last_input.stat().st_size
         assert size == 4096, (
@@ -239,40 +277,38 @@ class TestFailLoudGuard:
             "regression to ${var:0:N} would let multibyte input bypass the bound"
         )
 
-    def test_dump_is_not_world_readable(self, tmp_path):
-        """The dump mirrors the raw Stop payload (transcript_path reveals
+    @_BOTH_HOOKS
+    def test_dump_is_not_world_readable(self, hook, tmp_path):
+        """The dump mirrors the raw hook payload (transcript_path reveals
         the user's home + project layout). Permissions must be 600 so
         other users on a shared box cannot read it."""
-        rc, _ = _run_hook(SAVE_HOOK, "not-json garbage", tmp_path)
-        assert rc == 0
+        _run_hook(hook, "not-json garbage", tmp_path)
         last_input = tmp_path / ".mempalace" / "hook_state" / "last_input.log"
         mode = stat.S_IMODE(last_input.stat().st_mode)
         assert mode == 0o600, f"last_input.log mode should be 0600, got {oct(mode)}"
 
-    @pytest.mark.parametrize("hook", [SAVE_HOOK, PRECOMPACT_HOOK])
+    @_BOTH_HOOKS
     def test_python_stderr_captured_on_parse_failure(self, hook, tmp_path):
         """When the inline Python parser crashes (malformed JSON, missing
         interpreter, future regression), its stderr must land in
         last_python_err.log so a debugger can distinguish 'bad user
         input' from 'broken interpreter or broken inline script'."""
-        rc, _ = _run_hook(hook, "not-json garbage", tmp_path)
-        assert rc == 0
+        _run_hook(hook, "not-json garbage", tmp_path)
         err_log = tmp_path / ".mempalace" / "hook_state" / "last_python_err.log"
         assert err_log.exists(), "Python stderr must be captured on parse failure"
         contents = err_log.read_text()
         # Python's json.load raises JSONDecodeError with a recognizable
         # traceback. Don't pin the exact message (it varies by Python
         # version) but assert at least one canonical marker is present.
-        assert "Traceback" in contents or "json" in contents.lower(), (
-            f"expected Python traceback or json error, got: {contents!r}"
-        )
+        assert (
+            "Traceback" in contents or "json" in contents.lower()
+        ), f"expected Python traceback or json error, got: {contents!r}"
 
-    @pytest.mark.parametrize("hook", [SAVE_HOOK, PRECOMPACT_HOOK])
+    @_BOTH_HOOKS
     def test_python_stderr_log_is_not_world_readable_on_failure(self, hook, tmp_path):
         """The stderr capture mirrors the privacy expectation of
         last_input.log: on a populated failure write it must be 0600."""
-        rc, _ = _run_hook(hook, "not-json garbage", tmp_path)
-        assert rc == 0
+        _run_hook(hook, "not-json garbage", tmp_path)
         err_log = tmp_path / ".mempalace" / "hook_state" / "last_python_err.log"
         mode = stat.S_IMODE(err_log.stat().st_mode)
         assert mode == 0o600, f"last_python_err.log mode should be 0600 on failure, got {oct(mode)}"

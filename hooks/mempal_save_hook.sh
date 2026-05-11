@@ -105,7 +105,25 @@ INPUT=$(cat)
 # / future regression in this inline script" (ImportError, SyntaxError,
 # ModuleNotFoundError). Without the stderr capture, last_input.log shows
 # a valid payload while the actual root cause stays hidden.
-_mempal_parsed=$(echo "$INPUT" | "$MEMPAL_PYTHON_BIN" -c "
+#
+# Two extra hardenings inside the command-substitution subshell:
+#
+#   * ``umask 077`` so the ``2>$STATE_DIR/last_python_err.log`` redirect
+#     creates the file at mode 0600 atomically. Without it, the file
+#     appeared briefly at the parent process's umask (often 0644) before
+#     the explicit ``chmod 600`` below closed it — a small TOCTOU window
+#     where another local user on a shared box could read the traceback,
+#     which can echo back the user's home + project layout.
+#
+#   * ``printf '%s'`` in place of ``echo``. ``echo`` is unreliable for
+#     arbitrary payloads: it interprets ``-n``/``-e``/``-E`` as flags,
+#     handles backslashes inconsistently across builtin vs /bin/echo,
+#     and depends on the ``xpg_echo`` shopt on bash. JSON typically
+#     starts with ``{`` so the failure mode is latent, but flipping to
+#     ``printf '%s'`` removes the class of bug entirely.
+_mempal_parsed=$(
+    umask 077
+    printf '%s' "$INPUT" | "$MEMPAL_PYTHON_BIN" -c "
 import sys, json, re
 data = json.load(sys.stdin)
 sid = data.get('session_id', '')
@@ -119,7 +137,8 @@ print('__MEMPAL_PARSE_OK__')
 print(safe(sid))
 print(sha)
 print(safe(tp))
-" 2>"$STATE_DIR/last_python_err.log")
+" 2>"$STATE_DIR/last_python_err.log"
+)
 # The 2> redirect creates the file even when stderr is empty (success).
 # Remove the empty file so the state directory stays clean on the happy
 # path; on failure, lock the file's permissions to 600 to mirror
@@ -154,8 +173,11 @@ if [ -n "$INPUT" ] && [ "$_MEMPAL_PARSE_MARKER" != "__MEMPAL_PARSE_OK__" ]; then
     # to 4x. ``set -o pipefail`` is not enabled in this script, so the
     # natural ``head``-closes-stdin / SIGPIPE-on-printf interaction is
     # silently absorbed by bash (the canonical way to read N bytes from
-    # a string in shell).
-    printf '%s' "$INPUT" | head -c 4096 > "$STATE_DIR/last_input.log"
+    # a string in shell). The ``umask 077`` subshell creates
+    # last_input.log at mode 0600 atomically — the ``chmod 600`` below
+    # stays as a belt-and-suspenders guard if a future edit drops the
+    # umask line.
+    ( umask 077 && printf '%s' "$INPUT" | head -c 4096 > "$STATE_DIR/last_input.log" )
     chmod 600 "$STATE_DIR/last_input.log" 2>/dev/null
 fi
 
