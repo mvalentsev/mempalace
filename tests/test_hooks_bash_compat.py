@@ -57,9 +57,18 @@ def _run_hook(
     """Run a hook with a controlled environment and assert its exit code.
 
     Returns ``(stdout, stderr)``. On unexpected exit the assertion message
-    surfaces the captured stderr so CI failures are not silent (the hook
-    writes nothing useful to stdout on error, all diagnostics go to
-    stderr or hook.log).
+    surfaces the captured stderr so CI failures are not silent. The hook's
+    primary diagnostic stream is ``$STATE_DIR/hook.log`` plus the two
+    sidecar dumps ``last_input.log`` / ``last_python_err.log``; the
+    subprocess's stderr is typically empty on the documented exit paths
+    and is captured here only to surface unexpected interpreter failures
+    (e.g., a bash syntax error on a future edit).
+
+    Forces ``umask 0o022`` in the child so the hook's own ``umask 077``
+    inside the parse subshell is provably the sole reason the diagnostic
+    files end up at mode 0600 — without this, a permissive ambient umask
+    on the CI runner would mask a regression that drops the in-hook
+    ``umask`` line.
     """
     env = {
         "HOME": str(home),
@@ -74,6 +83,7 @@ def _run_hook(
         text=True,
         env=env,
         timeout=30,
+        preexec_fn=lambda: os.umask(0o022),
     )
     assert p.returncode == expected_rc, (
         f"{hook.name} exited {p.returncode} (expected {expected_rc}); "
