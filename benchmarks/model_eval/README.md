@@ -192,9 +192,43 @@ No new HTTP plumbing. No reimplementation of provider abstraction. The harness b
 
 Every result file includes the test machine's metadata (CPU, GPU, VRAM total, Ollama version, OS, hostname). Speed numbers are **not portable across machines** — use them for relative ranking on a single setup. Accuracy numbers cross-port cleanly.
 
-## Notes for new contributors to the harness itself
+## Contributions welcome
 
-If you're modifying the harness code (not just running it):
+### Adding models we missed
+
+The published candidate list is what one engineer + one search pass surfaced. There are absolutely small instruct models we didn't catch. If you know of a competitive ≤4B-parameter model that should be in the comparison, please:
+
+1. Add an entry to `candidates.yaml` following the existing schema (`tag`, `family`, `size_b`, `variant`, `quantization`, `expected_vram_mb`, `tier`, `notes`)
+2. Run it through the smoke test then the matrix using the existing `--candidates <your-tag>` filter
+3. Open a PR with the new candidate row + CSV results + a one-line analysis-report addendum
+
+Particularly interested in: function-calling-tuned models (Phi-4 mini, Nemotron-mini), recent instruction-tuned variants from research labs (Hermes, Dolphin, OpenHermes), and quantization-aware-trained variants of established families. If the model has multiple competitive quantizations, pick the smaller one that's within accuracy noise (per the project finding "newer ≠ better" and the quantization sweet-spot rule from the analysis report).
+
+### Adding other inference backends
+
+The harness is wired through `mempalace.llm_client.get_provider()`, which already supports three provider types: `ollama` (currently used here), `openai-compat`, and `anthropic`. That means any **OpenAI-compatible** local server should plug in with minimal work:
+
+- **LM Studio** — serves an OpenAI-compatible API on `http://localhost:1234/v1` by default
+- **llama.cpp server** — `./server` exposes OpenAI-compat on `http://localhost:8080/v1`
+- **vLLM** — `--port 8000` runs an OpenAI-compatible endpoint
+- **unsloth studio** — likewise serves OpenAI-compat for inference
+- **Docker Model Runner** — exposes models over OpenAI-compat on a per-model port
+- **Hugging Face TGI / TEI** — OpenAI-compatible endpoints
+
+The plumbing pieces a contributor would need to add:
+
+1. **A backend-selection flag** in `runner.py` and `orchestrator.py` (e.g. `--backend ollama|openai-compat|anthropic|lm-studio|...`) that constructs the right provider via `get_provider(backend_name, model=tag, endpoint=...)`.
+2. **Backend-specific timing extraction in `metrics.py`.** The current `extract_timing()` reads Ollama's `eval_count`, `prompt_eval_duration`, etc. Other backends report timing differently (OpenAI's `usage.completion_tokens`, llama.cpp's `tokens_per_second`, etc.). The harness will currently fill those columns with zeros for non-Ollama backends — degrades gracefully but loses the per-request timing breakdown.
+3. **Backend-specific VRAM probe.** Ollama exposes `/api/ps`; LM Studio has its own status endpoint; llama.cpp doesn't expose model memory directly. For non-Ollama backends, `vram_resident_mb` would return `None` (already handled). Peak-VRAM via `nvidia-smi` still works regardless.
+4. **A `candidates.yaml` field** to mark backend per candidate (e.g. `backend: lm-studio`).
+
+If you implement a new backend, the existing dataset and scoring code applies unchanged — the harness's accuracy numbers stay comparable across backends. Open a PR with the runner/orchestrator changes plus one CSV from your backend so we can validate the integration on a known model.
+
+If you build something niche that's worth comparing (Apple MLX, Intel OpenVINO, AMD ROCm-specific runtimes, edge-device runtimes like Termux + llama.cpp on phones), please share the methodology. Cross-runtime comparisons are exactly the kind of follow-up this harness is designed to enable.
+
+## Notes for harness maintainers
+
+When modifying the harness internals:
 
 - **`format: json` mode is enforced locally but ignored on Ollama Cloud.** Per Ollama's docs. Cloud models that "happen to" emit JSON do so by default behavior, not because Ollama enforces it. The `kimi-k2.6:cloud` memory-extraction `valid_json_rate: 0.37` is a documented manifestation.
 - **The memory-extraction `hallucination_rate` metric over-penalizes thorough models.** See the analysis report. Trust `mean_coverage` until a follow-up refines the scoring.
