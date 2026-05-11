@@ -71,6 +71,8 @@ def load_candidates(path: Path, tier: str) -> list[dict]:
         return [c for c in candidates if c.get("tier") == "cloud" or c.get("cloud")]
     if tier == "local":
         return [c for c in candidates if c.get("tier") != "cloud" and not c.get("cloud")]
+    if tier == "modern":
+        return [c for c in candidates if c.get("tier") == "modern"]
     if tier.startswith("tier<="):
         try:
             n = int(tier.split("<=")[1])

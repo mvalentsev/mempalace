@@ -98,6 +98,56 @@ candidates:
     tier: 1
     notes: ""
 
+  # ── Tier modern: model families missed in the first benchmark pass ──
+  # These existed at the time of the first run but weren't surfaced by
+  # the initial ollama.com search. Held in a separate tier so we can
+  # filter `--candidates modern` for cheap re-runs.
+
+  - tag: qwen3.5:4b-q4_K_M
+    family: qwen3.5
+    size_b: 4.0
+    variant: instruct
+    quantization: q4_K_M
+    expected_vram_mb: 3400
+    tier: modern
+    notes: "Qwen 3.5 4B. Newer generation. Same tag resolves to qwen3.5:4b (default quantization is q4_K_M)."
+
+  - tag: gemma4:e2b-it-q4_K_M
+    family: gemma4
+    size_b: 2.0
+    variant: instruct
+    quantization: q4_K_M
+    expected_vram_mb: 7200
+    tier: modern
+    notes: "Gemma 4 e2b (extended 2B). On-disk 7.2 GB — bigger than its parameter count suggests, likely vision/multimodal layers."
+
+  - tag: gemma4:e4b-it-q4_K_M
+    family: gemma4
+    size_b: 4.0
+    variant: instruct
+    quantization: q4_K_M
+    expected_vram_mb: 9600
+    tier: modern
+    notes: "Gemma 4 e4b (extended 4B). On-disk 9.6 GB."
+
+  - tag: granite4.1:3b-q4_K_M
+    family: granite
+    size_b: 3.0
+    variant: instruct
+    quantization: q4_K_M
+    expected_vram_mb: 2100
+    tier: modern
+    notes: "IBM Granite 4.1 3B. Smaller, focused on enterprise tasks."
+
+  - tag: ministral-3:3b
+    family: mistral
+    size_b: 3.0
+    variant: instruct
+    quantization: default
+    expected_vram_mb: 3000
+    tier: modern
+    notes: "Mistral Ministral 3 3B. No explicit q4_K_M tag; default 3.0 GB."
+
   # ── Tier 2: smaller sizes for VRAM-constrained users ─────────────────
   - tag: qwen3:1.7b-q4_K_M
     family: qwen3
