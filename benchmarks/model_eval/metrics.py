@@ -174,7 +174,11 @@ class VRAMPoller:
     Single-GPU is the assumed deployment for this benchmark.
     """
 
-    def __init__(self, interval_s: float = 0.1):
+    def __init__(self, interval_s: float = 0.5):
+        # 500ms balances peak-capture coverage against jitter from nvidia-smi
+        # subprocess spawns. Inference VRAM is mostly steady-state during a
+        # request, so missing the absolute peak by a few-percent margin is
+        # acceptable and worth the reduced overhead on the run itself.
         self.interval_s = interval_s
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None

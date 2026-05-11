@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from ...metrics import label_similarity
+from ...metrics import cosine_similarity, embed_text
 
 
 def _parse(predicted_text: str) -> list[dict]:
@@ -42,25 +42,42 @@ def score(
             "valid_json": _is_valid(predicted_text),
         }
 
+    # Pre-compute embeddings once per content string. Cuts API calls from
+    # O(P*T) to O(P+T) by separating the embedding step from the pairwise
+    # comparison. Important for cloud endpoints where each embed call is
+    # an HTTP round-trip.
+    truth_embs: list[list[float] | None] = []
+    for t in truth:
+        t_content = t.get("content", "")
+        if isinstance(t_content, str) and t_content:
+            truth_embs.append(embed_text(t_content, model=embed_model, endpoint=endpoint))
+        else:
+            truth_embs.append(None)
+
+    pred_embs: list[list[float] | None] = []
+    for p in pred:
+        p_content = p.get("content", "")
+        if isinstance(p_content, str) and p_content:
+            pred_embs.append(embed_text(p_content, model=embed_model, endpoint=endpoint))
+        else:
+            pred_embs.append(None)
+
     matched_truth_indices: set[int] = set()
     matched_pred_indices: set[int] = set()
     type_correct = 0
     type_total = 0
 
     for pi, p in enumerate(pred):
-        p_content = p.get("content", "")
-        p_type = p.get("type", "").strip().lower()
-        if not isinstance(p_content, str) or not p_content:
+        p_emb = pred_embs[pi]
+        if p_emb is None:
             continue
+        p_type = p.get("type", "").strip().lower()
         best_sim = 0.0
         best_ti = None
-        for ti, t in enumerate(truth):
-            if ti in matched_truth_indices:
+        for ti in range(len(truth)):
+            if ti in matched_truth_indices or truth_embs[ti] is None:
                 continue
-            t_content = t.get("content", "")
-            if not isinstance(t_content, str):
-                continue
-            sim = label_similarity(p_content, t_content, embed_model=embed_model, endpoint=endpoint)
+            sim = cosine_similarity(p_emb, truth_embs[ti])
             if sim > best_sim:
                 best_sim = sim
                 best_ti = ti

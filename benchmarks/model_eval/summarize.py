@@ -168,8 +168,7 @@ def render_production_picks(rows: list[dict], min_acc: float = 0.80, max_e2e_ms:
 
 def render_instruct_vs_reasoning(rows: list[dict]) -> str:
     instruct = [r for r in rows if r["model_tag"].startswith("qwen3:4b-instruct-2507") and not r.get("error")]
-    reasoning = [r for r in rows if "thinking" in r["model_tag"] or r["model_tag"] == "qwen3:4b" and not r.get("error")]
-    reasoning = [r for r in rows if "qwen3:4b-thinking" in r["model_tag"] and not r.get("error")]
+    reasoning = [r for r in rows if r["model_tag"].startswith("qwen3:4b-thinking") and not r.get("error")]
 
     if not instruct or not reasoning:
         return "_Not enough qwen3:4b paired results to compare._\n"

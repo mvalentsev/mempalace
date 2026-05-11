@@ -136,7 +136,12 @@ def main():
     parser.add_argument("--endpoint", default="http://localhost:11434")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--n", type=int, default=None, help="Limit each task to first N samples (debug mode)")
-    parser.add_argument("--continue-on-error", action="store_true", default=True)
+    parser.add_argument(
+        "--continue-on-error",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Continue running remaining (model, task) pairs after a failure (default). Use --no-continue-on-error to abort on first failure.",
+    )
     args = parser.parse_args()
 
     candidates = load_candidates(args.candidates_file, args.candidates)
