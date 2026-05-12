@@ -2294,6 +2294,11 @@ def _restore_stdout():
 
 
 def main():
+    # Drop leaked PYTHONPATH so any subprocess this server spawns starts
+    # with a clean env. The sys.path filter in mempalace/__init__.py
+    # already protects this process from the same ABI mismatch; here we
+    # extend the protection to children.
+    os.environ.pop("PYTHONPATH", None)
     _restore_stdout()
     # Force UTF-8 on stdio. MCP JSON-RPC is UTF-8, but Python on Windows
     # defaults stdin/stdout to the system codepage (e.g. cp1251), which

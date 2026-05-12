@@ -9,10 +9,57 @@ via monkeypatch to avoid touching real data.
 from datetime import datetime
 import json
 import os
+import subprocess
 import sys
 from unittest.mock import MagicMock
 
 import pytest
+
+
+# ── MCP entry point: PYTHONPATH stripping ────────────────────────────────
+
+
+_MCP_LEAK_PREFIX = "/__mempalace_mcp_leak_sentinel__"
+
+
+def test_mcp_main_strips_leaked_pythonpath_from_env():
+    """mempalace.mcp_server:main must drop PYTHONPATH from the process env
+    so any subprocess this server spawns starts clean. Mirrors the
+    sys.path-filter test in test_init.py but for the env half of the
+    split fix. See #1423.
+
+    Asserts ENV_MID between import and main() to prove main() is the
+    strip site (not __init__.py). The main loop reads JSON-RPC lines
+    from stdin until EOF; closing stdin makes readline() return '' and
+    exits the loop cleanly, which lets us observe the post-main env
+    state."""
+    expected_env = f"{_MCP_LEAK_PREFIX}/a{os.pathsep}{_MCP_LEAK_PREFIX}/b"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = expected_env
+    code = (
+        "import os, sys\n"
+        "from mempalace.mcp_server import main\n"
+        # mcp_server redirects stdout at import time for clean JSON-RPC;
+        # write the probe to stderr so the subprocess can observe it.
+        "sys.stderr.write('ENV_MID: ' + repr(os.environ.get('PYTHONPATH')) + '\\n')\n"
+        "main()\n"
+        "sys.stderr.write('ENV_AFTER: ' + repr(os.environ.get('PYTHONPATH')) + '\\n')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        input="",  # empty stdin → readline() returns '' → loop breaks
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    diag = f"rc={result.returncode}; stdout={result.stdout!r}; stderr={result.stderr!r}"
+    assert result.returncode == 0, f"subprocess failed: {diag}"
+    assert (
+        f"ENV_MID: {expected_env!r}" in result.stderr
+    ), f"package import unexpectedly stripped env (regression in __init__.py): {diag}"
+    assert "ENV_AFTER: None" in result.stderr, f"MCP server did not strip PYTHONPATH: {diag}"
 
 
 def _patch_mcp_server(monkeypatch, config, kg):

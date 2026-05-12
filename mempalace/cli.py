@@ -1129,6 +1129,12 @@ def _reconfigure_stdio_utf8_on_windows():
 
 
 def main():
+    # Drop leaked PYTHONPATH so any subprocess the CLI spawns (mine workers,
+    # repair tooling) starts with a clean env. The sys.path filter in
+    # mempalace/__init__.py already protects this process from the same
+    # ABI mismatch; here we extend the protection to children.
+    os.environ.pop("PYTHONPATH", None)
+
     _reconfigure_stdio_utf8_on_windows()
 
     version_label = f"MemPalace {__version__}"
