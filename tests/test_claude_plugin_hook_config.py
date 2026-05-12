@@ -59,7 +59,7 @@ def test_plugin_hook_timeout_within_bounds(hook_config: dict, event: str) -> Non
         ), f"{event} entry expected exactly one hook command, found {len(sub_hooks)}"
         for hook in sub_hooks:
             assert (
-                hook["type"] == "command"
+                hook.get("type") == "command"
             ), f"unexpected hook type for {event}: {hook.get('type')!r}"
             assert "timeout" in hook, f"{event} hook missing 'timeout' key"
             timeout = hook["timeout"]
