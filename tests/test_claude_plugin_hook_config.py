@@ -42,11 +42,21 @@ def test_plugin_hook_timeout_within_bounds(hook_config: dict, event: str) -> Non
     assert event in hook_config.get("hooks", {}), f"missing event {event!r} in hook config"
     entries = hook_config["hooks"][event]
     assert isinstance(entries, list) and entries, f"no entries declared for {event}"
+    # Pin cardinality: the plugin config intentionally declares exactly one
+    # command per event. A duplicate entry would silently double-fire the
+    # hook and pass per-hook bounds, so cardinality drift must fail loudly.
+    assert len(entries) == 1, (
+        f"{event} expected exactly one entry, found {len(entries)}; "
+        "duplicate entries would double-fire the hook"
+    )
     for entry in entries:
         sub_hooks = entry.get("hooks")
         assert (
             isinstance(sub_hooks, list) and sub_hooks
         ), f"{event} entry missing non-empty 'hooks' array"
+        assert (
+            len(sub_hooks) == 1
+        ), f"{event} entry expected exactly one hook command, found {len(sub_hooks)}"
         for hook in sub_hooks:
             assert (
                 hook["type"] == "command"
