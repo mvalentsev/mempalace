@@ -155,6 +155,4 @@ def test_quarantine_catches_zero_byte_link_lists_when_stale(tmp_path):
 
     moved_path = Path(moved[0])
     assert moved_path.exists()
-    assert moved_path.name.startswith(
-        "11111111-2222-3333-4444-555555555555.drift-"
-    )
+    assert moved_path.name.startswith("11111111-2222-3333-4444-555555555555.drift-")
