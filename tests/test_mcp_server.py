@@ -1868,3 +1868,144 @@ class TestKGLazyCache:
         with pytest.raises(_sqlite3.ProgrammingError):
             mcp_server._call_kg(lambda kg: kg.query_entity("Alice"))
         assert calls["count"] == 2, "expected exactly one retry beyond the initial attempt"
+
+
+# ── Param-shape diagnostics on tools/call dispatch (#1351) ──────────────
+
+
+class TestParamShapeDiagnostics:
+    """Dispatch-level TypeError on tools/call should surface as JSON-RPC
+    -32602 (Invalid params) with the offending parameter named, instead of
+    the opaque -32000 Internal tool error. Handler-internal TypeError and
+    non-TypeError exceptions stay generic -32000 (no internals leak).
+    """
+
+    def test_missing_required_returns_32602_with_param_name(self):
+        from mempalace.mcp_server import handle_request
+
+        resp = handle_request(
+            {
+                "method": "tools/call",
+                "id": 1,
+                "params": {
+                    "name": "mempalace_diary_write",
+                    "arguments": {"agent_name": "test"},
+                },
+            }
+        )
+        assert resp["error"]["code"] == -32602
+        assert "'entry'" in resp["error"]["message"]
+        assert "mempalace_diary_write" in resp["error"]["message"]
+
+    def test_handler_internal_typeerror_stays_generic_32000(self, monkeypatch):
+        from mempalace import mcp_server
+
+        def boom(**_kw):
+            raise TypeError("unsupported operand type(s) for +: 'int' and 'str'")
+
+        monkeypatch.setitem(mcp_server.TOOLS["mempalace_status"], "handler", boom)
+
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 2,
+                "params": {"name": "mempalace_status", "arguments": {}},
+            }
+        )
+        assert resp["error"]["code"] == -32000
+        assert resp["error"]["message"] == "Internal tool error"
+        assert "unsupported operand" not in resp["error"]["message"]
+
+    def test_chromadb_exception_stays_generic_32000(self, monkeypatch):
+        from mempalace import mcp_server
+
+        def boom(**_kw):
+            raise RuntimeError("db schema mismatch at /private/path/chroma.sqlite3")
+
+        monkeypatch.setitem(mcp_server.TOOLS["mempalace_status"], "handler", boom)
+
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 3,
+                "params": {"name": "mempalace_status", "arguments": {}},
+            }
+        )
+        assert resp["error"]["code"] == -32000
+        assert resp["error"]["message"] == "Internal tool error"
+        assert "db schema" not in resp["error"]["message"]
+        assert "/private/path" not in resp["error"]["message"]
+
+    def test_two_missing_required_lists_both_names(self):
+        """For 2+ missing args Python emits 'a' and 'b'; the response should
+        list both quoted names, not return a syntactically broken string.
+        """
+        from mempalace.mcp_server import handle_request
+
+        resp = handle_request(
+            {
+                "method": "tools/call",
+                "id": 4,
+                "params": {"name": "mempalace_diary_write", "arguments": {}},
+            }
+        )
+        assert resp["error"]["code"] == -32602
+        message = resp["error"]["message"]
+        assert "parameters" in message
+        assert "'agent_name'" in message
+        assert "'entry'" in message
+        assert " and " not in message.split("for tool")[0]
+
+    def test_handler_internal_signature_shape_stays_generic(self, monkeypatch):
+        """A TypeError whose function name does not match the dispatched
+        handler — e.g. raised by a helper called inside the handler body —
+        must fall through to generic -32000, otherwise we'd leak internal
+        helper/parameter names as if they were public tool parameters.
+        """
+        from mempalace import mcp_server
+
+        def calling_handler(**_kw):
+            def helper(req):
+                return req
+
+            helper()
+
+        monkeypatch.setitem(mcp_server.TOOLS["mempalace_status"], "handler", calling_handler)
+
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 5,
+                "params": {"name": "mempalace_status", "arguments": {}},
+            }
+        )
+        assert resp["error"]["code"] == -32000
+        assert resp["error"]["message"] == "Internal tool error"
+        assert "'req'" not in resp["error"]["message"]
+        assert "helper" not in resp["error"]["message"]
+
+    def test_unexpected_kw_typeerror_inside_handler_stays_generic(self, monkeypatch):
+        """The 'got an unexpected keyword argument' shape is unreachable from
+        real dispatch (schema-filter on line 2236 drops unknown kwargs for
+        normal handlers; **kwargs handlers per #684 accept anything). If a
+        handler raises that shape manually, the qualname mismatch must keep
+        it on the generic -32000 path so internal helper names cannot leak.
+        """
+        from mempalace import mcp_server
+
+        def boom(**_kw):
+            raise TypeError("some_helper() got an unexpected keyword argument 'foo'")
+
+        monkeypatch.setitem(mcp_server.TOOLS["mempalace_status"], "handler", boom)
+
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 6,
+                "params": {"name": "mempalace_status", "arguments": {}},
+            }
+        )
+        assert resp["error"]["code"] == -32000
+        assert resp["error"]["message"] == "Internal tool error"
+        assert "'foo'" not in resp["error"]["message"]
+        assert "some_helper" not in resp["error"]["message"]

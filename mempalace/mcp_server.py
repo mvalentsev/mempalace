@@ -45,6 +45,7 @@ sys.stdout = sys.stderr
 import argparse  # noqa: E402  (deferred until after stdio protection above)
 import json  # noqa: E402
 import logging  # noqa: E402
+import re  # noqa: E402
 import hashlib  # noqa: E402
 import sqlite3  # noqa: E402
 import threading  # noqa: E402
@@ -2155,6 +2156,15 @@ SUPPORTED_PROTOCOL_VERSIONS = [
 ]
 
 
+def _internal_tool_error(req_id, tool_name: str) -> dict:
+    logger.exception(f"Tool error in {tool_name}")
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32000, "message": "Internal tool error"},
+    }
+
+
 def handle_request(request):
     if not isinstance(request, dict):
         return {
@@ -2250,8 +2260,8 @@ def handle_request(request):
                     "id": req_id,
                     "error": {"code": -32602, "message": f"Invalid value for parameter '{key}'"},
                 }
+        tool_args.pop("wait_for_previous", None)
         try:
-            tool_args.pop("wait_for_previous", None)
             result = TOOLS[tool_name]["handler"](**tool_args)
             return {
                 "jsonrpc": "2.0",
@@ -2262,13 +2272,36 @@ def handle_request(request):
                     ]
                 },
             }
+        except TypeError as e:
+            # Qualname match prevents leaking internal helper/param names raised
+            # inside the handler body — see test_handler_internal_signature_shape_stays_generic.
+            msg = str(e)
+            handler = TOOLS[tool_name]["handler"]
+            handler_qn = getattr(handler, "__qualname__", None) or getattr(handler, "__name__", "")
+            # Qualname can include "<locals>" for nested defs and "<lambda>"
+            # for lambdas — accept Python's TypeError emit verbatim.
+            m_missing = re.match(
+                r"^([\w\.<>]+)\(\) missing \d+ required "
+                r"(?:positional |keyword-only )?arguments?: (.+)$",
+                msg,
+            )
+            if m_missing and m_missing.group(1) == handler_qn:
+                names = re.findall(r"'(\w+)'", m_missing.group(2))
+                if names:
+                    quoted = ", ".join(f"'{n}'" for n in names)
+                    word = "parameter" if len(names) == 1 else "parameters"
+                    logger.debug("Tool %s: missing required %s %s", tool_name, word, quoted)
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32602,
+                            "message": f"Missing required {word} {quoted} for tool {tool_name}",
+                        },
+                    }
+            return _internal_tool_error(req_id, tool_name)
         except Exception:
-            logger.exception(f"Tool error in {tool_name}")
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32000, "message": "Internal tool error"},
-            }
+            return _internal_tool_error(req_id, tool_name)
 
     # Notifications (missing id) must never get a response
     if req_id is None:
