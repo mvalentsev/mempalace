@@ -2242,6 +2242,26 @@ def handle_request(request):
         except (ValueError, TypeError):
             accepts_var_keyword = False
         if not accepts_var_keyword:
+            # An unknown kwarg here is almost always a wrong parameter *name*
+            # (e.g. text= instead of content=). Silently dropping it makes the
+            # cause surface only indirectly as a later "Missing required 'X'",
+            # so name it explicitly — symmetric with the missing-required path
+            # below. wait_for_previous is an internal transport kwarg in no
+            # tool schema; it is popped before dispatch further down, so it
+            # must not be reported as unknown here.
+            unknown = [k for k in tool_args if k not in schema_props and k != "wait_for_previous"]
+            if unknown:
+                quoted = ", ".join(f"'{k}'" for k in unknown)
+                word = "parameter" if len(unknown) == 1 else "parameters"
+                logger.debug("Tool %s: unknown %s %s", tool_name, word, quoted)
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32602,
+                        "message": f"Unknown {word} {quoted} for tool {tool_name}",
+                    },
+                }
             tool_args = {k: v for k, v in tool_args.items() if k in schema_props}
         # Coerce argument types based on input_schema.
         # MCP JSON transport may deliver integers as floats or strings;

@@ -2066,3 +2066,105 @@ class TestParamShapeDiagnostics:
         assert resp["error"]["message"] == "Internal tool error"
         assert "'foo'" not in resp["error"]["message"]
         assert "some_helper" not in resp["error"]["message"]
+
+
+class TestUnknownParamName:
+    """A kwarg not in the tool schema (wrong parameter *name*, e.g. text=
+    instead of content=) should surface as JSON-RPC -32602 naming the
+    offending kwarg, instead of being silently dropped and resurfacing
+    indirectly as a later "Missing required 'X'". Symmetric with the
+    missing-required path in TestParamShapeDiagnostics. The internal
+    wait_for_previous transport kwarg must never be flagged, and
+    **kwargs pass-through handlers must keep accepting unknown kwargs.
+    """
+
+    def test_unknown_param_returns_32602_naming_the_wrong_kwarg(self):
+        from mempalace.mcp_server import handle_request
+
+        resp = handle_request(
+            {
+                "method": "tools/call",
+                "id": 7,
+                "params": {
+                    "name": "mempalace_add_drawer",
+                    "arguments": {"wing": "w", "room": "r", "text": "hello"},
+                },
+            }
+        )
+        assert resp["error"]["code"] == -32602
+        message = resp["error"]["message"]
+        assert "'text'" in message
+        assert "Unknown parameter" in message
+        assert "mempalace_add_drawer" in message
+        # Names the actual wrong kwarg, not the indirect missing-required symptom.
+        assert "Missing required" not in message
+
+    def test_two_unknown_params_list_both_names(self):
+        from mempalace.mcp_server import handle_request
+
+        resp = handle_request(
+            {
+                "method": "tools/call",
+                "id": 8,
+                "params": {
+                    "name": "mempalace_add_drawer",
+                    "arguments": {"wing": "w", "room": "r", "text": "a", "bogus": "b"},
+                },
+            }
+        )
+        assert resp["error"]["code"] == -32602
+        message = resp["error"]["message"]
+        assert "parameters" in message
+        assert "'text'" in message
+        assert "'bogus'" in message
+
+    def test_wait_for_previous_not_flagged_as_unknown(self, monkeypatch):
+        """wait_for_previous is an internal transport kwarg in no tool schema;
+        it is popped before dispatch and must not trip the unknown-param check
+        for a normal (non-**kwargs) handler.
+        """
+        from mempalace import mcp_server
+
+        def stub(agent_name, entry, topic="general"):
+            return {"ok": True, "agent": agent_name}
+
+        monkeypatch.setitem(mcp_server.TOOLS["mempalace_diary_write"], "handler", stub)
+
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 9,
+                "params": {
+                    "name": "mempalace_diary_write",
+                    "arguments": {
+                        "agent_name": "x",
+                        "entry": "y",
+                        "wait_for_previous": True,
+                    },
+                },
+            }
+        )
+        assert "error" not in resp
+        assert "result" in resp
+
+    def test_kwargs_passthrough_handler_keeps_accepting_unknown(self, monkeypatch):
+        """Handlers that explicitly accept **kwargs (per #684) bypass the
+        schema filter entirely, so an unknown kwarg must still pass through
+        rather than being rejected as -32602.
+        """
+        from mempalace import mcp_server
+
+        def passthrough(**kwargs):
+            return {"ok": True, "got": sorted(kwargs)}
+
+        monkeypatch.setitem(mcp_server.TOOLS["mempalace_status"], "handler", passthrough)
+
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 10,
+                "params": {"name": "mempalace_status", "arguments": {"bogus": 1}},
+            }
+        )
+        assert "error" not in resp
+        assert "result" in resp
