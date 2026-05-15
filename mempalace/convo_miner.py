@@ -430,9 +430,10 @@ def mine_convos(
     Chunking parameters (chunk_size, min_chunk_size) are read from
     MempalaceConfig so `config.json` governs both this path and the
     project-file miner in `miner.py`. `min_chunk_size` preserves
-    convo_miner's stricter default (30) when not explicitly set in
-    config.json, so a user who never touches chunking keeps the
-    existing behavior.
+    convo_miner's lower default (30 — more permissive than the 50-char
+    project default, so short conversation exchanges are not dropped)
+    when not explicitly set in config.json, so a user who never touches
+    chunking keeps the existing behavior.
     """
     from .config import MempalaceConfig
 
@@ -440,8 +441,10 @@ def mine_convos(
     cfg_chunk_size = palace_config.chunk_size
     # Only override convo_miner's MIN_CHUNK_SIZE when the user has set
     # min_chunk_size explicitly. min_chunk_size_explicit returns the
-    # validated value or None — None keeps convo's stricter 30-char
-    # floor. Using the validated accessor (not raw _file_config) means a
+    # validated value or None — None keeps convo's lower 30-char floor
+    # (more permissive than the 50-char project default, so short
+    # exchanges aren't dropped). Using the validated accessor (not raw
+    # _file_config) means a
     # garbage/negative/bool config value can't TypeError the length gate
     # below or ValueError out of chunk_exchanges and abort convo ingest.
     explicit_min = palace_config.min_chunk_size_explicit

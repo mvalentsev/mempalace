@@ -332,7 +332,9 @@ class MempalaceConfig:
                 if not value:
                     return None
             value = int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: JSON ``1e1000`` parses to float('inf'), and
+            # ``int(inf)`` raises it — still just garbage config, not a crash.
             return None
         if minimum is not None and value < minimum:
             return None
@@ -403,8 +405,10 @@ class MempalaceConfig:
         Returns the coerced int when ``config.json`` defines a usable
         ``min_chunk_size`` (``>= 0`` and ``<= chunk_size``); ``None`` when
         the key is absent/null or the value is unusable. ``convo_miner``
-        relies on the ``None`` sentinel to keep its stricter 30-char floor
-        for untuned users while still honoring an explicit override —
+        relies on the ``None`` sentinel to keep its lower 30-char floor
+        (more permissive than the 50-char project default, so short
+        exchanges are not dropped) for untuned users while still honoring
+        an explicit override —
         replacing the raw, unvalidated ``_file_config`` reach that crashed
         convo ingest on a bad key (#1024 review).
         """

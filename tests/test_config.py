@@ -508,6 +508,17 @@ def test_convo_min_chunk_fallback_is_always_safe_int(tmp_path):
     assert (explicit if explicit is not None else MIN_CHUNK_SIZE) == 15
 
 
+def test_min_chunk_size_explicit_handles_json_infinity(tmp_path):
+    """JSON ``Infinity`` round-trips to float('inf'); ``int(inf)`` raises
+    OverflowError. That is still garbage config, not a crash — must fall
+    back to None (untuned), same as any other unusable value."""
+    cfg = _write_config(tmp_path, min_chunk_size=float("inf"))
+    assert cfg.min_chunk_size_explicit is None
+    # chunk_size path coerces the same value → documented default, no crash.
+    cfg2 = _write_config(tmp_path, chunk_size=float("inf"))
+    assert cfg2.chunk_size == 800
+
+
 def test_chunk_text_rejects_non_positive_chunk_size():
     """Direct callers (tests, library users) that pass ``chunk_size <= 0``
     must hit a clear ValueError, not loop forever."""
