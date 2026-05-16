@@ -97,6 +97,365 @@ def _get_collection(palace_path, create=False):
     return client, client.get_collection("mempalace_drawers")
 
 
+# ── Cold-start diagnostics (#1495) ──────────────────────────────────────
+
+
+class TestColdStartDiagnostics:
+    """``MEMPALACE_LOG_FILE`` + ``MEMPALACE_EAGER_WARMUP`` (#1495).
+
+    Each test runs ``main()`` in a fresh ``subprocess`` because
+
+    * ``_init_logging`` uses ``logging.basicConfig(force=True)`` which
+      would otherwise reset pytest's ``caplog`` handlers across cases,
+    * ``ChromaBackend._resolve_embedding_function`` is a class-level
+      attribute that test monkeypatching mutates globally,
+    * The whole point of the new env vars is process-startup behaviour
+      and must be exercised under a real ``main()`` boot path.
+
+    Pattern mirrors ``test_mcp_main_strips_leaked_pythonpath_from_env``.
+    ``_run_main`` injects ``extra_code`` as a hard-coded ``-c`` source
+    fragment from this file only (no untrusted input flows in); the
+    subprocess argv form ``[sys.executable, "-c", code]`` avoids shell
+    interpretation entirely.
+    """
+
+    @staticmethod
+    def _run_main(env_overrides: dict, extra_code: str = "", timeout: int = 30):
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in env_overrides or env_overrides[k] is not None
+        }
+        for k, v in env_overrides.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+        code = extra_code + "from mempalace.mcp_server import main\nmain()\n"
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            env=env,
+            input="",  # empty stdin → readline() returns '' → loop breaks immediately
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+
+    def test_log_file_unset_attaches_only_stream_handler(self, tmp_path):
+        marker = tmp_path / "handlers.txt"
+        env_overrides = {"MEMPALACE_LOG_FILE": None}
+        extra = (
+            "import logging, pathlib\n"
+            "from mempalace import mcp_server  # noqa: F401 — triggers _init_logging()\n"
+            f"pathlib.Path({str(marker)!r}).write_text("
+            "','.join(type(h).__name__ for h in logging.getLogger().handlers)"
+            ")\n"
+            "raise SystemExit(0)\n"
+        )
+        result = self._run_main(env_overrides, extra_code=extra)
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert marker.read_text().split(",") == ["StreamHandler"], marker.read_text()
+
+    def test_log_file_empty_string_attaches_only_stream_handler(self, tmp_path):
+        marker = tmp_path / "handlers.txt"
+        env_overrides = {"MEMPALACE_LOG_FILE": "   "}  # whitespace counts as unset after .strip()
+        extra = (
+            "import logging, pathlib\n"
+            "from mempalace import mcp_server  # noqa: F401\n"
+            f"pathlib.Path({str(marker)!r}).write_text("
+            "','.join(type(h).__name__ for h in logging.getLogger().handlers)"
+            ")\n"
+            "raise SystemExit(0)\n"
+        )
+        result = self._run_main(env_overrides, extra_code=extra)
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert marker.read_text().split(",") == ["StreamHandler"], marker.read_text()
+
+    def test_log_file_set_attaches_file_handler_and_persists_startup_line(self, tmp_path):
+        log_path = tmp_path / "mcp.log"
+        result = self._run_main({"MEMPALACE_LOG_FILE": str(log_path)})
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert log_path.exists(), f"log file missing; stderr={result.stderr!r}"
+        body = log_path.read_text(encoding="utf-8")
+        assert "MemPalace MCP Server starting" in body, body
+
+    def test_log_file_invalid_path_falls_back_to_stderr_with_warning(self, tmp_path):
+        # Unique directory name we can grep for cross-platform without
+        # depending on path-separator formatting in the %r warning value.
+        missing_dir = "missing_dir_for_1495"
+        bad_path = tmp_path / missing_dir / "mcp.log"
+        result = self._run_main({"MEMPALACE_LOG_FILE": str(bad_path)})
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        # Invalid path must NOT crash the server, must surface a warning, must
+        # NOT create the file (the missing-directory ancestor is the failure).
+        # Warning must name MEMPALACE_LOG_FILE so the operator knows the source.
+        assert "could not be opened" in result.stderr, result.stderr
+        assert "MEMPALACE_LOG_FILE" in result.stderr, result.stderr
+        assert missing_dir in result.stderr, result.stderr
+        assert not bad_path.exists()
+
+    @staticmethod
+    def _make_fake_palace(tmp_path):
+        """Create just enough on disk for ``_maybe_eager_warmup_embedder``'s
+        fresh-install pre-check to pass (``chroma.sqlite3`` exists).
+
+        Returns the palace dir as a string. The file is empty — production
+        code must not read its bytes during pre-check; only its existence
+        gates whether warmup proceeds to the chromadb client open.
+        """
+        palace = tmp_path / "palace"
+        palace.mkdir()
+        (palace / "chroma.sqlite3").touch()
+        return str(palace)
+
+    @staticmethod
+    def _spy_get_collection_extra(marker_path, return_expr="None"):
+        """Render an ``extra_code`` fragment that monkeypatches ``_get_collection``.
+
+        ``marker_path`` records that the spy fired; ``return_expr`` is a Python
+        expression evaluated inside the subprocess for the call's return value
+        (e.g. ``"None"`` or ``"_FakeCol()"``).
+        """
+        return (
+            "import pathlib\n"
+            "from mempalace import mcp_server\n"
+            "def _spy_get_collection(create=False):\n"
+            f"    pathlib.Path({str(marker_path)!r}).write_text('called')\n"
+            f"    return {return_expr}\n"
+            "mcp_server._get_collection = _spy_get_collection\n"
+        )
+
+    def test_eager_warmup_off_by_default_does_not_open_collection(self, tmp_path):
+        marker = tmp_path / "called.txt"
+        palace = self._make_fake_palace(tmp_path)
+        result = self._run_main(
+            {"MEMPALACE_EAGER_WARMUP": None, "MEMPALACE_PALACE_PATH": palace},
+            extra_code=self._spy_get_collection_extra(marker),
+        )
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert not marker.exists(), "warmup ran despite env var being unset"
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "FALSE"])
+    def test_eager_warmup_explicit_falsy_skips_collection_open_without_warning(
+        self, tmp_path, value
+    ):
+        marker = tmp_path / "called.txt"
+        palace = self._make_fake_palace(tmp_path)
+        result = self._run_main(
+            {"MEMPALACE_EAGER_WARMUP": value, "MEMPALACE_PALACE_PATH": palace},
+            extra_code=self._spy_get_collection_extra(marker),
+        )
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert not marker.exists(), f"warmup ran for explicit-falsy value {value!r}"
+        assert (
+            "not recognized" not in result.stderr
+        ), f"explicit-falsy {value!r} should not log a warning; stderr={result.stderr!r}"
+
+    @pytest.mark.parametrize("value", ["tru", "maybe", "ENABLED", "2"])
+    def test_eager_warmup_unrecognized_value_warns_and_skips_collection_open(self, tmp_path, value):
+        marker = tmp_path / "called.txt"
+        palace = self._make_fake_palace(tmp_path)
+        result = self._run_main(
+            {"MEMPALACE_EAGER_WARMUP": value, "MEMPALACE_PALACE_PATH": palace},
+            extra_code=self._spy_get_collection_extra(marker),
+        )
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert not marker.exists(), f"warmup ran despite unrecognized value {value!r}"
+        assert "not recognized" in result.stderr, result.stderr
+
+    @pytest.mark.parametrize("value", ["1", "true", "YES", "On"])
+    def test_eager_warmup_truthy_opens_collection_and_invokes_query(self, tmp_path, value):
+        """C1 (#1495): warmup must call ``col.query(...)`` — not just open the collection.
+
+        ChromaDB's ``ONNXMiniLM_L6_V2.__init__`` only imports ``onnxruntime``;
+        ``InferenceSession`` and model download happen inside ``__call__``,
+        which the chromadb query path drives. Pinning both call sites here
+        prevents a regression to a no-op resolver-only warmup (the same
+        failure mode silent-failure-hunter flagged in initial review).
+        Reporter's #1495 proposal: same path covers HNSW cold-load too.
+        """
+        open_marker = tmp_path / "open_called.txt"
+        query_marker = tmp_path / "query_called.txt"
+        palace = self._make_fake_palace(tmp_path)
+        extra = (
+            "import pathlib\n"
+            "from mempalace import mcp_server\n"
+            "class _FakeCol:\n"
+            "    def query(self, **kwargs):\n"
+            f"        pathlib.Path({str(query_marker)!r}).write_text(repr(kwargs))\n"
+            "        return {'ids': [[]], 'distances': [[]], 'documents': [[]]}\n"
+            "_fake_col = _FakeCol()\n"
+            "def _spy_get_collection(create=False):\n"
+            f"    pathlib.Path({str(open_marker)!r}).write_text('open')\n"
+            "    return _fake_col\n"
+            "mcp_server._get_collection = _spy_get_collection\n"
+        )
+        result = self._run_main(
+            {"MEMPALACE_EAGER_WARMUP": value, "MEMPALACE_PALACE_PATH": palace},
+            extra_code=extra,
+        )
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert (
+            open_marker.exists()
+        ), f"_get_collection not called for {value!r}; stderr={result.stderr!r}"
+        assert query_marker.exists(), (
+            f"col.query not invoked for {value!r} — warmup is a no-op "
+            f"(would let cold-load hit first MCP call); stderr={result.stderr!r}"
+        )
+        # query was called with the sentinel probe text and n_results=1.
+        kwargs_repr = query_marker.read_text()
+        assert "__mempalace_warmup_probe__" in kwargs_repr, kwargs_repr
+        assert "n_results" in kwargs_repr and "1" in kwargs_repr, kwargs_repr
+        # Success path logs embedder + HNSW readiness + palace + device for ops.
+        assert "embedder + HNSW ready" in result.stderr, result.stderr
+        assert f"palace={palace}" in result.stderr, result.stderr
+
+    def test_eager_warmup_fresh_install_skips_without_creating_palace(self, tmp_path):
+        """Real integration test (no monkeypatch): an empty palace dir with no
+        ``chroma.sqlite3`` must trigger the pre-check skip path BEFORE any
+        chromadb call materializes the palace scaffold on disk.
+
+        This pins three behaviours simultaneously:
+
+        1. ``returncode == 0`` — fresh install does not crash the server.
+        2. ``chroma.sqlite3`` is NOT created — warmup respects the
+           "no on-disk state before ``mempalace init``" contract from
+           CLAUDE.md ("Incremental only"). A regression that drops the
+           pre-check would let chromadb's ``PersistentClient(path=...)``
+           materialize the palace dir.
+        3. ``"nothing to warm"`` lands in stderr — the documented INFO
+           message actually fires (the previous test that asserted this
+           via a monkeypatched ``_get_collection`` was tautological because
+           the real ``_get_collection`` swallows ``NotFoundError`` into
+           ``return None`` and silently materializes the palace).
+        4. No chromadb retry tracebacks ("attempt N/2 failed") leak into
+           stderr — those are the noise this PR exists to reduce.
+        """
+        palace = tmp_path / "fresh_palace"
+        palace.mkdir()
+        # Confirm precondition: no chroma.sqlite3 exists before main().
+        db_path = palace / "chroma.sqlite3"
+        assert not db_path.exists()
+        result = self._run_main(
+            {"MEMPALACE_EAGER_WARMUP": "1", "MEMPALACE_PALACE_PATH": str(palace)},
+        )
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert "nothing to warm" in result.stderr, result.stderr
+        assert "collection open failed" not in result.stderr, result.stderr
+        assert "warmup query failed" not in result.stderr, result.stderr
+        assert "embedder + HNSW ready" not in result.stderr, result.stderr
+        assert "attempt 1/2 failed" not in result.stderr, result.stderr
+        assert "attempt 2/2 failed" not in result.stderr, result.stderr
+        # Pin the no-side-effect contract: the warmup MUST NOT create the
+        # palace scaffold on disk before the user runs ``mempalace init``.
+        assert not db_path.exists(), (
+            f"warmup materialized chroma.sqlite3 in a fresh palace dir "
+            f"(violates 'Incremental only' from CLAUDE.md); stderr={result.stderr!r}"
+        )
+
+    def test_eager_warmup_collection_returning_none_surfaces_warning(self, tmp_path):
+        """_get_collection retries internally and returns None on persistent
+        failure (mcp_server.py:373). Warmup must not log a misleading
+        success line in that case."""
+        palace = self._make_fake_palace(tmp_path)
+        extra = self._spy_get_collection_extra(tmp_path / "called.txt", return_expr="None")
+        result = self._run_main(
+            {"MEMPALACE_EAGER_WARMUP": "1", "MEMPALACE_PALACE_PATH": palace},
+            extra_code=extra,
+        )
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert "_get_collection returned None" in result.stderr, result.stderr
+        assert "embedder + HNSW ready" not in result.stderr, result.stderr
+
+    def test_eager_warmup_collection_open_failure_logs_and_does_not_block_server(self, tmp_path):
+        palace = self._make_fake_palace(tmp_path)
+        extra = (
+            "from mempalace import mcp_server\n"
+            "def _boom(create=False):\n"
+            "    raise RuntimeError('synthetic-collection-open-fail-1495')\n"
+            "mcp_server._get_collection = _boom\n"
+        )
+        result = self._run_main(
+            {"MEMPALACE_EAGER_WARMUP": "1", "MEMPALACE_PALACE_PATH": palace},
+            extra_code=extra,
+        )
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert "collection open failed" in result.stderr, result.stderr
+        assert "synthetic-collection-open-fail-1495" in result.stderr, result.stderr
+        # palace + error class included in the diagnostic
+        assert f"palace={palace}" in result.stderr, result.stderr
+        assert "error=RuntimeError" in result.stderr, result.stderr
+
+    def test_eager_warmup_query_failure_logs_and_persists_to_log_file(self, tmp_path):
+        """Query may raise (broken HNSW, network failure during ONNX download,
+        runtime decoder error). Server stays up and the diagnostic lands in
+        both stderr AND ``MEMPALACE_LOG_FILE`` — the latter is the whole
+        point of #1495 for ops debugging the original -32000."""
+        palace = self._make_fake_palace(tmp_path)
+        log_path = tmp_path / "mcp.log"
+        extra = (
+            "from mempalace import mcp_server\n"
+            "class _BadCol:\n"
+            "    def query(self, **kwargs):\n"
+            "        raise RuntimeError('synthetic-query-fail-1495')\n"
+            "mcp_server._get_collection = lambda create=False: _BadCol()\n"
+        )
+        result = self._run_main(
+            {
+                "MEMPALACE_EAGER_WARMUP": "1",
+                "MEMPALACE_PALACE_PATH": palace,
+                "MEMPALACE_LOG_FILE": str(log_path),
+            },
+            extra_code=extra,
+        )
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert "warmup query failed" in result.stderr, result.stderr
+        assert "synthetic-query-fail-1495" in result.stderr, result.stderr
+        assert f"palace={palace}" in result.stderr, result.stderr
+        assert "error=RuntimeError" in result.stderr, result.stderr
+        assert log_path.exists(), f"log file not created; stderr={result.stderr!r}"
+        body = log_path.read_text(encoding="utf-8")
+        assert "warmup query failed" in body, body
+        assert "synthetic-query-fail-1495" in body, body
+
+    def test_log_file_path_with_embedded_newline_does_not_crash(self, tmp_path):
+        """``MEMPALACE_LOG_FILE`` containing a newline (rare misconfig from
+        a YAML/env file copy-paste) must fall through the (OSError, ValueError)
+        catch rather than escape as an unhandled exception at import time."""
+        # Embedding \n inside a path component triggers ValueError on POSIX
+        # ("embedded null byte" raises on OS-level open) or OSError depending
+        # on platform — both should land in the fail-soft branch.
+        bad_path = str(tmp_path / "with\nnewline" / "mcp.log")
+        result = self._run_main({"MEMPALACE_LOG_FILE": bad_path})
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        # Server proceeds with stderr-only and surfaces the env-var-named
+        # warning so ops can correlate the misconfig.
+        assert "could not be opened" in result.stderr, result.stderr
+        assert "MEMPALACE_LOG_FILE" in result.stderr, result.stderr
+
+    def test_log_file_invalid_path_failure_surfaces_before_first_log_record(self, tmp_path):
+        """Behavioural pin: ``delay=True`` MUST NOT be used on the FileHandler.
+
+        With ``delay=True`` an invalid path raises inside ``emit()`` at runtime,
+        unhandled, defeating the fail-soft contract documented in ``_init_logging``.
+        This test pins the eager-open semantics by checking that the warning lands
+        BEFORE the ``MemPalace MCP Server starting...`` banner — proving that
+        ``FileHandler.__init__`` raised and was caught at module import."""
+        bad_path = tmp_path / "regression_pin_dir" / "mcp.log"
+        result = self._run_main({"MEMPALACE_LOG_FILE": str(bad_path)})
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        warning_pos = result.stderr.find("could not be opened")
+        banner_pos = result.stderr.find("MemPalace MCP Server starting")
+        assert warning_pos != -1, f"warning missing; stderr={result.stderr!r}"
+        assert banner_pos != -1, f"banner missing; stderr={result.stderr!r}"
+        assert warning_pos < banner_pos, (
+            f"warning at {warning_pos} must precede banner at {banner_pos} — "
+            f"if banner is first, FileHandler was opened lazily (delay=True regression). "
+            f"stderr={result.stderr!r}"
+        )
+
+
 # ── Protocol Layer ──────────────────────────────────────────────────────
 
 

@@ -85,7 +85,70 @@ from .palace_graph import (  # noqa: E402
 
 from .knowledge_graph import KnowledgeGraph, DEFAULT_KG_PATH  # noqa: E402
 
-logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+
+def _init_logging() -> None:
+    """Root-logger init: always stderr, optionally append to ``MEMPALACE_LOG_FILE``.
+
+    Stderr-only is the default. When ``MEMPALACE_LOG_FILE`` is set, a
+    ``FileHandler`` is attached so MCP-client failures that the client
+    does not surface (e.g. the ``-32000`` cold-load timeout in #1495)
+    remain diagnosable from the file.
+
+    Failure modes:
+
+    * Invalid path (missing directory, no perms, Windows NUL byte) →
+      stderr-only with a warning. The env var must not become a new
+      server-start failure surface — that would defeat the diagnostic
+      goal. ``ValueError`` is included in the catch because Windows
+      raises it for paths with embedded NUL bytes, not ``OSError``.
+    * Root logger already configured (host app embedding the server,
+      transitive imports touching ``logging``) → ``force=True`` resets
+      the handlers so MEMPALACE_LOG_FILE's contract holds regardless
+      of what touched root logging first. Without ``force=True``,
+      ``basicConfig`` is a no-op when handlers exist and the env var
+      silently does nothing — exactly the diagnostic black hole #1495
+      exists to close.
+    * Concurrent writers (multiple ``mempalace-mcp`` processes pointing
+      at the same path) interleave at the line level. The handler uses
+      append mode so nothing is overwritten, but operators running
+      Claude Code + Claude Desktop simultaneously should give each
+      process its own log path.
+
+    ``delay=True`` is intentionally NOT set: deferring the open means an
+    invalid path raises at ``emit()`` time (unhandled), defeating the
+    fail-soft contract. With eager open the same error surfaces inside
+    ``FileHandler.__init__`` and lands in our ``except`` below.
+
+    Module-level invocation: this function runs at import time, preserving
+    the side effect of the previous module-level ``logging.basicConfig``
+    call. Callers that import ``mempalace.mcp_server`` for introspection
+    (``TOOLS`` dict, handler functions) inherit the reset; this matches
+    pre-PR behaviour and is intentional for an MCP entry-point module.
+    """
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    # MEMPALACE_LOG_FILE is operator-supplied and opt-in; this is a
+    # local-first server (CLAUDE.md design principle), so no path
+    # sanitization — the operator's process UID is the trust boundary.
+    log_file = os.environ.get("MEMPALACE_LOG_FILE", "").strip()
+    file_handler_error: Exception | None = None
+    if log_file:
+        try:
+            handlers.append(logging.FileHandler(log_file, mode="a", encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            # Fail-soft: see "Invalid path" failure mode above. Broad on
+            # (OSError, ValueError) because Windows raises ValueError for
+            # NUL-byte paths while POSIX uses OSError for missing-dir / EPERM.
+            file_handler_error = exc
+    logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=handlers, force=True)
+    if file_handler_error is not None:
+        logging.getLogger("mempalace_mcp").warning(
+            "MEMPALACE_LOG_FILE=%r could not be opened (%s); using stderr only",
+            log_file,
+            file_handler_error,
+        )
+
+
+_init_logging()
 logger = logging.getLogger("mempalace_mcp")
 
 
@@ -2346,6 +2409,156 @@ def _restore_stdout():
     sys.stdout = _REAL_STDOUT
 
 
+_WARMUP_TRUTHY = {"1", "true", "yes", "on"}
+_WARMUP_FALSY = {"", "0", "false", "no", "off"}
+# Sentinel text for the warmup query. Distinctive so it cannot semantically
+# match real drawer content (e.g. a palace containing notes about "warmup"
+# routines) and is greppable in chromadb debug logs if the team ever adds
+# request instrumentation. Single non-empty string is enough to trigger
+# ChromaDB's ONNXMiniLM_L6_V2.__call__ → _download_model_if_not_exists +
+# InferenceSession.
+_WARMUP_PROBE_TEXT = "__mempalace_warmup_probe__"
+
+
+def _describe_device_safe() -> str:
+    """Return ``embedding.describe_device()`` value or ``"unknown"`` on failure.
+
+    Used only inside warmup-failure log lines; the import is deferred so
+    that an embedding-stack import error cannot itself crash the warmup
+    diagnostic path.
+    """
+    try:
+        from .embedding import describe_device
+
+        return describe_device()
+    except Exception:  # fail-soft: see docstring — log-message helper must not crash
+        return "unknown"
+
+
+def _maybe_eager_warmup_embedder() -> None:
+    """Pre-load embedder + HNSW segment at startup when ``MEMPALACE_EAGER_WARMUP`` is truthy.
+
+    The first MCP tool call that touches chromadb (``diary_write``,
+    ``add_drawer``, ``search``) otherwise pays two compounding cold-load
+    costs that together can exceed the MCP client timeout and surface as
+    ``-32000`` "Internal tool error" with no recoverable trace on the
+    agent side (#1495):
+
+    1. ONNX/CoreML embedder init in :func:`mempalace.embedding.get_embedding_function`
+       (5–30s on first inference; ChromaDB's ``ONNXMiniLM_L6_V2.__call__``
+       triggers ``_download_model_if_not_exists`` + ``InferenceSession``).
+    2. HNSW segment cold-load (reading ``data_level0.bin`` into RAM on
+       first collection operation; seconds on palaces of 50k+ drawers).
+
+    Warming via :func:`_get_collection`'s collection-then-query path
+    covers BOTH in a single startup-phase call — mirroring the reporter's
+    proposal in #1495 — so users with large existing palaces see the
+    same benefit as users on the embedder-only cost path.
+
+    Truthy parsing accepts ``1/true/yes/on`` (case-insensitive); falsy
+    set ``0/false/no/off`` and empty/whitespace are silently off; any
+    other value logs a warning and stays off so typos like ``tru`` do
+    not silently disable the feature.
+
+    Fresh-install guard (pre-check, NOT a catch): ``_get_collection``'s
+    retry layer absorbs ``_ChromaNotFoundError`` and returns ``None`` while
+    also materialising ``chroma.sqlite3`` on disk via the chromadb client
+    constructor. To preserve the documented "no palace yet → nothing to
+    warm" contract WITHOUT writing palace scaffolding before
+    ``mempalace init`` (which would violate CLAUDE.md "Incremental only"),
+    we test for ``chroma.sqlite3`` ourselves before touching the chromadb
+    client. Operators who set ``MEMPALACE_EAGER_WARMUP=1`` in their MCP
+    config and launch the server before running ``mempalace init`` get a
+    single INFO line and no on-disk side effect.
+
+    Fail-soft beyond the fresh-install pre-check:
+
+    * **Backend open failure** (palace path misconfigured, file locked,
+      corrupted HNSW that ``quarantine_stale_hnsw`` cannot recover) →
+      log exception with device + palace context and return. The next
+      embedding-requiring call sees the same fail mode it would have
+      without warmup.
+    * **`_get_collection` retried and returned None** → palace exists
+      but chromadb cannot open the collection (rare; usually a stale
+      sqlite + segment-files mismatch surfaced by `_get_client` rebuild).
+      A warning suffices because the retry layer already wrote two
+      tracebacks with the underlying chromadb error class.
+    * **Query failure** (network failure during ONNX model download,
+      provider init crash, runtime decoder error) → log exception with
+      device + palace context and return. Same fail-mode preservation.
+
+    Note: on an existing palace with an empty collection (created via
+    ``mempalace init`` but never written to), ``col.query`` succeeds but
+    returns ``{'ids': [[]]}`` without reading any HNSW segment — the
+    embedder warms but there is no HNSW segment to load. The success log
+    still says ``embedder + HNSW ready`` because the no-HNSW-segment case
+    has zero cold-load cost; nothing was skipped that the first real tool
+    call would have paid.
+    """
+    raw = os.environ.get("MEMPALACE_EAGER_WARMUP", "").strip().lower()
+    if raw in _WARMUP_FALSY:
+        return
+    if raw not in _WARMUP_TRUTHY:
+        logger.warning(
+            "MEMPALACE_EAGER_WARMUP=%r is not recognized (use one of %s); warmup disabled",
+            raw,
+            sorted(_WARMUP_TRUTHY | (_WARMUP_FALSY - {""})),
+        )
+        return
+    palace_path = _config.palace_path
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.isfile(db_path):
+        # Pre-check (NOT a try/except on _ChromaNotFoundError, which never
+        # propagates out of _get_collection — see docstring). No palace
+        # file means nothing to warm AND avoids the chromadb-client
+        # side effect of materialising the palace dir.
+        logger.info(
+            "MEMPALACE_EAGER_WARMUP=%s: no palace at %s — nothing to warm",
+            raw,
+            palace_path,
+        )
+        return
+    # Cache device once: _describe_device_safe re-imports embedding stack
+    # each call, which is wasteful inside a function that already paid
+    # that cost via the warmup query below.
+    device = _describe_device_safe()
+    try:
+        col = _get_collection(create=False)
+    except Exception as exc:  # fail-soft per docstring — broad on purpose
+        logger.exception(
+            "MEMPALACE_EAGER_WARMUP=%s: collection open failed (palace=%s, device=%s, error=%s)",
+            raw,
+            palace_path,
+            device,
+            type(exc).__name__,
+        )
+        return
+    if col is None:
+        logger.warning(
+            "MEMPALACE_EAGER_WARMUP=%s: _get_collection returned None for palace=%s — see prior log lines",
+            raw,
+            palace_path,
+        )
+        return
+    try:
+        col.query(query_texts=[_WARMUP_PROBE_TEXT], n_results=1)
+    except Exception as exc:  # fail-soft per docstring — broad on purpose
+        logger.exception(
+            "MEMPALACE_EAGER_WARMUP=%s: warmup query failed (palace=%s, device=%s, error=%s)",
+            raw,
+            palace_path,
+            device,
+            type(exc).__name__,
+        )
+    else:
+        logger.info(
+            "MEMPALACE_EAGER_WARMUP=%s: embedder + HNSW ready (palace=%s, device=%s)",
+            raw,
+            palace_path,
+            device,
+        )
+
+
 def main():
     """MCP server entry point for the ``mempalace-mcp`` console script.
 
@@ -2377,6 +2590,10 @@ def main():
     # is visible at startup rather than on first use (#1222). Pure
     # filesystem read; never opens a chromadb client.
     _refresh_vector_disabled_flag()
+    # Opt-in: pre-load the embedder so the first chromadb-write tool call
+    # does not pay the ONNX/CoreML cold-load tax under the MCP client
+    # timeout (#1495). Default off — preserves current startup latency.
+    _maybe_eager_warmup_embedder()
     while True:
         try:
             line = sys.stdin.readline()
