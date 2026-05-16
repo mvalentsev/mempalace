@@ -1202,7 +1202,7 @@ def test_cmd_compress_stores_results(mock_config_cls, capsys):
 
     with (
         patch("mempalace.palace._open_collection_or_explain", return_value=mock_col),
-        patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend),
+        patch("mempalace.palace.get_closets_collection", return_value=mock_comp_col),
         patch.dict("sys.modules", {"mempalace.dialect": mock_dialect_mod}),
     ):
         cmd_compress(args)
@@ -1210,12 +1210,6 @@ def test_cmd_compress_stores_results(mock_config_cls, capsys):
     assert "Stored" in out
     assert "Total:" in out
     mock_comp_col.upsert.assert_called_once()
-    # Verify the compress output goes to the closets collection so that
-    # palace.get_closets_collection() / searcher can read it back (#1244).
-    (call_args, _kwargs) = mock_backend.get_or_create_collection.call_args
-    assert (
-        call_args[1] == "mempalace_closets"
-    ), f"compress should write to mempalace_closets, got {call_args[1]!r}"
     assert "mempalace_closets" in out
 
 

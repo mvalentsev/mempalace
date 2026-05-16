@@ -992,8 +992,8 @@ def cmd_mcp(args):
 
 def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
-    from .backends.chroma import ChromaBackend
     from .dialect import Dialect
+    from .palace import get_closets_collection
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
 
@@ -1019,11 +1019,6 @@ def cmd_compress(args):
     col = _open_collection_or_explain(palace_path, collection_name="mempalace_drawers")
     if col is None:
         sys.exit(1)
-
-    # Backend instance for the closets write below. chromadb's
-    # PersistentClient is cached per palace path internally, so this second
-    # ChromaBackend instance shares the underlying client with the helper.
-    backend = ChromaBackend()
 
     # Query drawers in batches to avoid SQLite variable limit (~999)
     where = {"wing": args.wing} if args.wing else None
@@ -1094,7 +1089,10 @@ def cmd_compress(args):
     # Store compressed versions (unless dry-run)
     if not args.dry_run:
         try:
-            comp_col = backend.get_or_create_collection(palace_path, "mempalace_closets")
+            # Route through palace.get_closets_collection so the shared
+            # _DEFAULT_BACKEND is reused (avoids a redundant ChromaBackend
+            # instance and its potential WAL-lock contention on Windows).
+            comp_col = get_closets_collection(palace_path, create=True)
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
                 comp_meta["compression_ratio"] = round(stats["size_ratio"], 1)
