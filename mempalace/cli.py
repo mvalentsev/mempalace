@@ -590,6 +590,10 @@ def cmd_sync(args):
     if not os.path.isdir(palace_path):
         print(f"\n  No palace found at {palace_path}")
         return
+    if not os.path.isfile(os.path.join(palace_path, "chroma.sqlite3")):
+        print(f"\n  Palace dir at {palace_path} exists but has no chroma.sqlite3 yet.")
+        print("  Run: mempalace mine <dir>")
+        return
 
     project_dirs = []
     if args.dir:
@@ -1007,14 +1011,19 @@ def cmd_compress(args):
     else:
         dialect = Dialect()
 
-    # Connect to palace
-    backend = ChromaBackend()
-    try:
-        col = backend.get_collection(palace_path, "mempalace_drawers")
-    except Exception:
-        print(f"\n  No palace found at {palace_path}")
-        print("  Run: mempalace init <dir> then mempalace mine <dir>")
+    # State-aware open: distinguish "no palace" from "initialized but empty"
+    # from "corrupt" via the shared helper (#1498). MCP and library callers
+    # catch the backend exceptions directly; CLI gets the friendly print.
+    from .palace import _open_collection_or_explain
+
+    col = _open_collection_or_explain(palace_path, collection_name="mempalace_drawers")
+    if col is None:
         sys.exit(1)
+
+    # Backend instance for the closets write below. chromadb's
+    # PersistentClient is cached per palace path internally, so this second
+    # ChromaBackend instance shares the underlying client with the helper.
+    backend = ChromaBackend()
 
     # Query drawers in batches to avoid SQLite variable limit (~999)
     where = {"wing": args.wing} if args.wing else None

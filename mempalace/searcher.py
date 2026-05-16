@@ -16,6 +16,7 @@ import re
 import sqlite3
 from pathlib import Path
 
+from .backends import CollectionNotInitializedError, PalaceNotFoundError
 from .palace import get_closets_collection, get_collection
 
 # Closet pointer line format: "topic|entities|→drawer_id_a,drawer_id_b"
@@ -297,7 +298,13 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     """
     try:
         col = get_collection(palace_path, create=False)
-    except Exception as e:
+    except CollectionNotInitializedError as e:
+        # State C from #1498: palace initialized but never mined.
+        print(f"\n  Palace at {palace_path} is initialized but empty (no drawers yet).")
+        print("  Run: mempalace mine <dir>")
+        raise SearchError(f"Palace at {palace_path} is initialized but empty") from e
+    except PalaceNotFoundError as e:
+        # State A from #1498: palace dir missing.
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         raise SearchError(f"No palace found at {palace_path}") from e
