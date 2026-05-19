@@ -60,6 +60,8 @@ CONVO_EXTENSIONS = {
 
 MIN_CHUNK_SIZE = 30
 CHUNK_SIZE = 800  # chars per drawer — align with miner.py
+_LINE_GROUP_SIZE = 25  # lines per fallback group when no paragraph breaks
+_LINE_FALLBACK_MIN_NEWLINES = 20  # trigger line-group fallback above this newline count
 DRAWER_UPSERT_BATCH_SIZE = 1000
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB — skip files larger than this.
 # Matches miner.py at 500 MB. Long Claude Code sessions, multi-year
@@ -163,7 +165,7 @@ def chunk_exchanges(
     if quote_lines >= 3:
         return _chunk_by_exchange(lines, chunk_size, min_chunk_size)
     else:
-        return _chunk_by_paragraph(content, min_chunk_size)
+        return _chunk_by_paragraph(content, chunk_size, min_chunk_size)
 
 
 def _chunk_by_exchange(lines: list, chunk_size: int, min_chunk_size: int) -> list:
@@ -194,49 +196,49 @@ def _chunk_by_exchange(lines: list, chunk_size: int, min_chunk_size: int) -> lis
             ai_response = " ".join(ai_lines)
             content = f"{user_turn}\n{ai_response}" if ai_response else user_turn
 
-            # Split into multiple drawers when the exchange exceeds chunk_size
-            if len(content) > chunk_size:
-                # First chunk: user turn + as much response as fits
-                first_part = content[:chunk_size]
-                if len(first_part.strip()) > min_chunk_size:
-                    chunks.append({"content": first_part, "chunk_index": len(chunks)})
-                # Remaining response in chunk_size-sized continuation drawers
-                remainder = content[chunk_size:]
-                while remainder:
-                    part = remainder[:chunk_size]
-                    remainder = remainder[chunk_size:]
-                    if len(part.strip()) > min_chunk_size:
-                        chunks.append({"content": part, "chunk_index": len(chunks)})
-            elif len(content.strip()) > min_chunk_size:
-                chunks.append(
-                    {
-                        "content": content,
-                        "chunk_index": len(chunks),
-                    }
-                )
+            _emit_bounded(chunks, content, chunk_size, min_chunk_size)
         else:
             i += 1
 
     return chunks
 
 
-def _chunk_by_paragraph(content: str, min_chunk_size: int) -> list:
+def _emit_bounded(
+    chunks: list,
+    content: str,
+    chunk_size: int,
+    min_chunk_size: int,
+) -> None:
+    """Append ``content`` as one or more drawers, none exceeding ``chunk_size``.
+
+    The ``min_chunk_size`` floor gates the WHOLE call (drops the input if
+    its stripped length is at or below the floor, treated as noise). Once
+    the input passes the floor, every slice is emitted verbatim so a
+    small trailing remainder is preserved instead of silently dropped.
+    The index-based loop avoids the O(N^2) repeated-substring allocation
+    of a ``while content: content = content[chunk_size:]`` shape.
+    """
+    if len(content.strip()) <= min_chunk_size:
+        return
+    for i in range(0, len(content), chunk_size):
+        chunks.append({"content": content[i : i + chunk_size], "chunk_index": len(chunks)})
+
+
+def _chunk_by_paragraph(content: str, chunk_size: int, min_chunk_size: int) -> list:
     """Fallback: chunk by paragraph breaks."""
     chunks = []
     paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
 
     # If no paragraph breaks and long content, chunk by line groups
-    if len(paragraphs) <= 1 and content.count("\n") > 20:
+    if len(paragraphs) <= 1 and content.count("\n") > _LINE_FALLBACK_MIN_NEWLINES:
         lines = content.split("\n")
-        for i in range(0, len(lines), 25):
-            group = "\n".join(lines[i : i + 25]).strip()
-            if len(group) > min_chunk_size:
-                chunks.append({"content": group, "chunk_index": len(chunks)})
+        for i in range(0, len(lines), _LINE_GROUP_SIZE):
+            group = "\n".join(lines[i : i + _LINE_GROUP_SIZE]).strip()
+            _emit_bounded(chunks, group, chunk_size, min_chunk_size)
         return chunks
 
     for para in paragraphs:
-        if len(para) > min_chunk_size:
-            chunks.append({"content": para, "chunk_index": len(chunks)})
+        _emit_bounded(chunks, para, chunk_size, min_chunk_size)
 
     return chunks
 
