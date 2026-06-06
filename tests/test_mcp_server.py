@@ -5634,3 +5634,15 @@ def test_ensure_sqlite_integrity_status_joins_inflight_probe(monkeypatch):
         release_probe.set()
         background.join(5)
         consumer_thread.join(5)
+
+
+def test_wal_dir_nests_under_config_dir():
+    """The WAL must live under the active `MempalaceConfig.config_dir`,
+    not at a hardcoded `~/.mempalace/wal`. The previous hardcoded path
+    bypassed XDG resolution: a user with `MEMPALACE_CONFIG_DIR` pointing
+    at `~/.config/mempalace` would still see the WAL written to the
+    legacy location, fragmenting state across two directories."""
+    from mempalace import mcp_server, wal
+
+    assert wal._WAL_FILE.parent.parent == mcp_server._config.config_dir
+    assert wal._WAL_FILE.parent.name == "wal"
