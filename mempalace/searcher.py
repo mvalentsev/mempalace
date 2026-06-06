@@ -9,12 +9,14 @@ weak closets (regex extraction on narrative content) can only help, never
 hide drawers the direct path would have found.
 """
 
+import functools
 import logging
 import math
 import os
 import re
 import sqlite3
 from pathlib import Path
+from typing import Optional
 
 from .backends import (
     BackendError,
@@ -23,7 +25,8 @@ from .backends import (
     PalaceNotFoundError,
     UnsupportedCapabilityError,
 )
-from .config import sqlite_read_uri
+from .config import MempalaceConfig, sqlite_read_uri
+from .i18n import _canonical_lang, get_stopwords
 from .palace import (
     _open_collection_or_explain,
     get_closets_collection,
@@ -60,16 +63,76 @@ def _first_or_empty(results, key: str) -> list:
     return outer[0] or []
 
 
-def _tokenize(text: str) -> list:
+def _tokenize(text: str, stop_words: frozenset = frozenset()) -> list:
     """Lowercase + strip to alphanumeric tokens of length ≥ 2.
 
     Tolerates ``None`` documents — Chroma can return ``None`` in the
     ``documents`` field for drawers without text content, which would
     otherwise raise ``AttributeError`` mid-rerank.
+
+    When ``stop_words`` is non-empty, filters tokens that match any entry.
+    The set is expected to already be lowercased so callers can share one
+    instance across query + document tokenization.
     """
     if not text:
         return []
-    return _TOKEN_RE.findall(text.lower())
+    tokens = _TOKEN_RE.findall(text.lower())
+    if stop_words:
+        return [t for t in tokens if t not in stop_words]
+    return tokens
+
+
+@functools.lru_cache(maxsize=16)
+def _stopwords_for_canonical(canonical_lang: str) -> frozenset:
+    """Cached stop-word set keyed by a canonical locale code.
+
+    Splitting canonicalization out of the cache key avoids thrashing when
+    callers pass equivalent variants (``"EN"``, ``"en"``, ``"en-US"``) —
+    they all hit the same cache slot.
+    """
+    return frozenset(get_stopwords(canonical_lang))
+
+
+def _stopwords_for_lang(lang: str) -> frozenset:
+    """Resolve raw ``lang`` to its canonical form before cache lookup.
+
+    Kept as the public-shaped helper (callers and tests reach for this
+    name) while the lru_cache lives on ``_stopwords_for_canonical`` to
+    keep the cache key normalized.
+    """
+    canonical = _canonical_lang(lang) or lang.lower()
+    return _stopwords_for_canonical(canonical)
+
+
+def _resolve_stop_words(lang: Optional[str]) -> frozenset:
+    """Return the BM25 stop-word set for ``lang`` as an opt-in feature.
+
+    When ``lang`` is an explicit string, loads that locale's stop words.
+    When ``lang`` is ``None``, resolution order is:
+
+    1. ``MEMPALACE_LANG`` / ``MEMPAL_LANG`` environment variable.
+    2. ``MempalaceConfig().lang_explicit`` (which itself reads the env vars
+       first, then ``config.json["lang"]``).
+
+    The env-var fast path avoids constructing ``MempalaceConfig`` (which
+    reads ``config.json`` from disk) on the hot search path when the user
+    has set the env var — the common case for explicit-locale palaces.
+    Palaces that never configured a language get an empty set, preserving
+    pre-PR scoring byte-for-byte.
+    """
+    if lang is None:
+        env_val = os.environ.get("MEMPALACE_LANG") or os.environ.get("MEMPAL_LANG")
+        if env_val and env_val.strip():
+            lang = env_val.strip()
+        else:
+            try:
+                lang = MempalaceConfig().lang_explicit
+            except Exception:
+                logger.debug("lang resolution failed, skipping stop-word filter", exc_info=True)
+                return frozenset()
+        if lang is None:
+            return frozenset()
+    return _stopwords_for_lang(lang)
 
 
 def _bm25_scores(
@@ -77,6 +140,7 @@ def _bm25_scores(
     documents: list,
     k1: float = 1.5,
     b: float = 0.75,
+    stop_words: frozenset = frozenset(),
 ) -> list:
     """Compute Okapi-BM25 scores for ``query`` against each document.
 
@@ -94,11 +158,11 @@ def _bm25_scores(
     Returns a list of scores in the same order as ``documents``.
     """
     n_docs = len(documents)
-    query_terms = set(_tokenize(query))
+    query_terms = set(_tokenize(query, stop_words))
     if not query_terms or n_docs == 0:
         return [0.0] * n_docs
 
-    tokenized = [_tokenize(d) for d in documents]
+    tokenized = [_tokenize(d, stop_words) for d in documents]
     doc_lens = [len(toks) for toks in tokenized]
     if not any(doc_lens):
         return [0.0] * n_docs
@@ -187,6 +251,7 @@ def _hybrid_rank(
     vector_weight: float = 0.6,
     bm25_weight: float = 0.4,
     metric: str = "cosine",
+    stop_words: frozenset = frozenset(),
 ) -> list:
     """Re-rank ``results`` by a convex combination of vector similarity and BM25.
 
@@ -211,7 +276,7 @@ def _hybrid_rank(
         return results
 
     docs = [r.get("text", "") for r in results]
-    bm25_raw = _bm25_scores(query, docs)
+    bm25_raw = _bm25_scores(query, docs, stop_words=stop_words)
     max_bm25 = max(bm25_raw) if bm25_raw else 0.0
     bm25_norm = [s / max_bm25 for s in bm25_raw] if max_bm25 > 0 else [0.0] * len(bm25_raw)
 
@@ -435,7 +500,12 @@ def _hnsw_capacity_diverged(palace_path: str) -> bool:
 
 
 def _print_search_results_bm25_only(
-    query: str, palace_path: str, wing: str, room: str, n_results: int
+    query: str,
+    palace_path: str,
+    wing: str,
+    room: str,
+    n_results: int,
+    stop_words: frozenset = frozenset(),
 ) -> None:
     """CLI fallback printer for when HNSW divergence fences off vector search.
 
@@ -443,6 +513,11 @@ def _print_search_results_bm25_only(
     the format they expect, plus a clear notice pointing at
     ``mempalace repair``. Replaces the silent SIGBUS users otherwise hit
     when the CLI called ``col.query()`` against a diverged segment.
+
+    ``stop_words`` reaches the BM25 scorer here for the same reason
+    :func:`_vector_disabled_search` forwards it on the MCP side: this path
+    still ranks by BM25, so dropping the filter would rank a diverged
+    palace by different rules than a healthy one.
     """
     result = _bm25_only_via_sqlite(
         query=query,
@@ -450,6 +525,7 @@ def _print_search_results_bm25_only(
         wing=wing,
         room=room,
         n_results=n_results,
+        stop_words=stop_words,
     )
     hits = result.get("results", [])
 
@@ -493,6 +569,10 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     Search the palace. Returns verbatim drawer content.
     Optionally filter by wing (project) or room (aspect).
     """
+    # Resolved before the fence below: both exits from this function rank by
+    # BM25, so the filter has to be in hand on either branch.
+    stop_words = _resolve_stop_words(None)
+
     # Probe a Chroma palace before get_collection(). Opening the client can
     # load native index state, and embedder-identity enforcement may call
     # collection.count(); both happen before the old query-only guard and can
@@ -508,7 +588,9 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
         backend_name = None
 
     if backend_name == "chroma" and _hnsw_capacity_diverged(palace_path):
-        return _print_search_results_bm25_only(query, palace_path, wing, room, n_results)
+        return _print_search_results_bm25_only(
+            query, palace_path, wing, room, n_results, stop_words=stop_words
+        )
 
     col = _open_collection_or_explain(palace_path, opener=get_collection)
     if col is None:
@@ -558,7 +640,7 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
         {"text": doc or "", "distance": float(dist), "metadata": meta or {}}
         for doc, meta, dist in zip(docs, metas, dists)
     ]
-    hits = _hybrid_rank(hits, query, metric=metric)
+    hits = _hybrid_rank(hits, query, metric=metric, stop_words=stop_words)
 
     print(f"\n{'=' * 60}")
     print(f'  Results for: "{query}"')
@@ -599,6 +681,7 @@ def _bm25_only_via_sqlite(
     max_candidates: int = 500,
     _include_internal: bool = False,
     collection_name: str = None,
+    stop_words: frozenset = frozenset(),
 ) -> dict:
     """BM25-only search reading drawers directly from chroma.sqlite3.
 
@@ -807,7 +890,7 @@ def _bm25_only_via_sqlite(
 
     # Local BM25 over the candidate set.
     docs = [c["text"] for c in candidates]
-    bm25_raw = _bm25_scores(query, docs)
+    bm25_raw = _bm25_scores(query, docs, stop_words=stop_words)
     max_bm25 = max(bm25_raw) if bm25_raw else 0.0
     for c, raw in zip(candidates, bm25_raw):
         c["bm25_score"] = round(raw, 3)
@@ -842,6 +925,7 @@ def _merge_bm25_union_candidates(
     n_results: int,
     max_distance: float = 0.0,
     source_file: str = None,
+    stop_words: frozenset = frozenset(),
 ) -> None:
     """Append top-K backend lexical candidates into ``hits`` in place.
 
@@ -990,6 +1074,7 @@ def _finalize_candidate_hits(
     n_results: int,
     max_distance: float,
     source_file: str = None,
+    stop_words: frozenset = frozenset(),
 ) -> tuple:
     try:
         _apply_candidate_strategy(
@@ -1010,7 +1095,9 @@ def _finalize_candidate_hits(
             "hint": "Use candidate_strategy='vector' or select a backend that supports lexical search.",
         }
 
-    hits = _hybrid_rank(hits, query, metric=_metric_for_collection(drawers_col))[:n_results]
+    hits = _hybrid_rank(
+        hits, query, metric=_metric_for_collection(drawers_col), stop_words=stop_words
+    )[:n_results]
     for h in hits:
         h.pop("_sort_key", None)
         h.pop("_source_file_full", None)
@@ -1044,6 +1131,7 @@ def _vector_disabled_search(
     n_results: int,
     collection_name: str,
     source_file: str = None,
+    stop_words: frozenset = frozenset(),
 ) -> dict:
     try:
         backend_name = resolve_backend_name(palace_path)
@@ -1066,6 +1154,7 @@ def _vector_disabled_search(
         source_file=source_file,
         n_results=n_results,
         collection_name=collection_name,
+        stop_words=stop_words,
     )
 
 
@@ -1155,6 +1244,7 @@ def search_memories(
     vector_disabled: bool = False,
     candidate_strategy: str = "vector",
     collection_name: str = None,
+    lang: Optional[str] = None,
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -1192,11 +1282,22 @@ def search_memories(
               When ``max_distance > 0.0`` is also set, BM25-only candidates
               are skipped — they have no vector distance and would silently
               violate the requested distance threshold.
+        lang: Locale code for BM25 stop-word filtering (opt-in). When
+            omitted, reads ``MempalaceConfig().lang_explicit`` — returns an
+            empty set unless the user has set ``MEMPALACE_LANG`` /
+            ``MEMPAL_LANG`` or ``config.json["lang"]``. Palaces without an
+            explicit language skip filtering entirely, preserving pre-PR
+            byte-identical scoring.
     """
     # Validate the strategy eagerly so invalid values fail the same way
     # regardless of whether the call routes through the vector path or
     # the BM25-only fallback below.
     _validate_candidate_strategy(candidate_strategy)
+
+    # Resolve stop words once up-front so every BM25 site (the vector path's
+    # `_hybrid_rank`, the `vector_disabled` fallback, and the union-merge
+    # candidate gather) tokenizes against the same locale.
+    stop_words = _resolve_stop_words(lang)
 
     if vector_disabled:
         return _vector_disabled_search(
@@ -1207,6 +1308,7 @@ def search_memories(
             n_results=n_results,
             collection_name=collection_name,
             source_file=source_file,
+            stop_words=stop_words,
         )
 
     drawers_col, open_error = _open_search_collection(palace_path, collection_name)
@@ -1368,7 +1470,7 @@ def search_memories(
         indexed.sort(key=lambda p: p[0])
         ordered_docs = [d for _, d in indexed]
 
-        query_terms = set(_tokenize(query))
+        query_terms = set(_tokenize(query, stop_words))
         best_idx, best_score = 0, -1
         for idx, d in enumerate(ordered_docs):
             d_lower = d.lower()
@@ -1407,6 +1509,7 @@ def search_memories(
         n_results=n_results,
         max_distance=max_distance,
         source_file=source_file,
+        stop_words=stop_words,
     )
     if strategy_error:
         return strategy_error
