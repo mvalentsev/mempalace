@@ -28,9 +28,7 @@ question-driven, not reflexive.
 
 ## The protocol
 
-1. **On wake-up** (if a session-start hook is installed, honour its
-   `additional_context`): scope recall to the wing inferred from the
-   workspace, then continue.
+1. **On wake-up** (if a session-start hook injected context, honour its wing scoping / `additional_context`): scope recall to the wing inferred from the workspace, then continue.
 2. **Before responding** about people, projects, past events, or prior
    decisions: call `mempalace_search` first. For relational or temporal
    facts ("who reported to whom in March", "what was true then"), call
