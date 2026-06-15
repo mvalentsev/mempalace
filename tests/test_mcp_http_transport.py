@@ -14,7 +14,7 @@ Design constraints
 * Uses Starlette's synchronous TestClient so we stay in normal pytest
   (no pytest-asyncio dependency needed).
 """
-import json
+
 import threading
 import types
 import sys
@@ -24,11 +24,11 @@ import pytest
 starlette = pytest.importorskip("starlette", reason="starlette not installed")
 pytest.importorskip("uvicorn", reason="uvicorn not installed")
 
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
-from starlette.testclient import TestClient
+from starlette.applications import Starlette  # noqa: E402
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import JSONResponse, Response  # noqa: E402
+from starlette.routing import Route  # noqa: E402
+from starlette.testclient import TestClient  # noqa: E402
 
 
 # ── Stub out heavy dependencies so import succeeds in CI without a palace ─
@@ -121,6 +121,7 @@ def client():
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
+
 def _tools_list(req_id=1):
     return {"jsonrpc": "2.0", "id": req_id, "method": "tools/list", "params": {}}
 
@@ -140,13 +141,14 @@ def _initialize(req_id=1):
 
 # ── Tests ─────────────────────────────────────────────────────────────────
 
+
 class TestHealth:
     def test_returns_200(self, client):
         r = client.get("/health")
         assert r.status_code == 200
 
     def test_reports_tool_count(self, client):
-        data = r = client.get("/health")
+        r = client.get("/health")
         assert r.json()["status"] == "ok"
         assert r.json()["tools"] == len(_srv.TOOLS)
         assert r.json()["tools"] > 0
@@ -172,9 +174,10 @@ class TestToolsList:
 
     def test_idempotent_repeated_calls(self, client):
         sets = [
-            frozenset(t["name"] for t in
-                      client.post("/mcp", json=_tools_list(i)).json()
-                      ["result"]["tools"])
+            frozenset(
+                t["name"]
+                for t in client.post("/mcp", json=_tools_list(i)).json()["result"]["tools"]
+            )
             for i in range(20)
         ]
         assert len(set(sets)) == 1, "tools/list returned different sets across calls"
@@ -199,38 +202,54 @@ class TestInitialize:
 
 class TestNotifications:
     def test_initialized_returns_202(self, client):
-        r = client.post("/mcp", json={
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {},
-        })
+        r = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            },
+        )
         assert r.status_code == 202
         assert r.content == b""  # no body for notifications
 
     def test_other_notification_returns_202(self, client):
-        r = client.post("/mcp", json={
-            "jsonrpc": "2.0",
-            "method": "notifications/progress",
-            "params": {"progressToken": 1, "progress": 50},
-        })
+        r = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": {"progressToken": 1, "progress": 50},
+            },
+        )
         assert r.status_code == 202
 
 
 class TestErrorHandling:
     def test_unknown_method_returns_32601(self, client):
-        r = client.post("/mcp", json={
-            "jsonrpc": "2.0", "id": 99, "method": "bogus/method", "params": {},
-        })
+        r = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "bogus/method",
+                "params": {},
+            },
+        )
         data = r.json()
         assert data["error"]["code"] == -32601
         assert data["error"]["message"] != ""
 
     def test_unknown_tool_returns_32601(self, client):
-        r = client.post("/mcp", json={
-            "jsonrpc": "2.0", "id": 5,
-            "method": "tools/call",
-            "params": {"name": "nonexistent_tool", "arguments": {}},
-        })
+        r = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "nonexistent_tool", "arguments": {}},
+            },
+        )
         assert r.json()["error"]["code"] == -32601
 
     def test_malformed_json_returns_400(self, client):
@@ -243,9 +262,15 @@ class TestErrorHandling:
         assert r.json()["error"]["code"] == -32700
 
     def test_ping_returns_empty_result(self, client):
-        r = client.post("/mcp", json={
-            "jsonrpc": "2.0", "id": 3, "method": "ping", "params": {},
-        })
+        r = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "ping",
+                "params": {},
+            },
+        )
         assert r.json()["result"] == {}
 
 
@@ -263,9 +288,7 @@ class TestConcurrency:
         def call():
             try:
                 r = client.post("/mcp", json=_tools_list())
-                results.append(
-                    frozenset(t["name"] for t in r.json()["result"]["tools"])
-                )
+                results.append(frozenset(t["name"] for t in r.json()["result"]["tools"]))
             except Exception as exc:
                 errors.append(exc)
 
