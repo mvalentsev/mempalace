@@ -4660,16 +4660,21 @@ def _serve_http(host: str, port: int) -> None:
                 self.send_header("Content-Length", "0")
                 self.send_header("Connection", "close")
                 self.end_headers()
+                self.close_connection = True
                 return
 
             self._send_json(200, response)
 
-    with _MCPHTTPServer((host, port), _Handler) as httpd:
-        logger.info("MemPalace MCP HTTP server listening on http://%s:%s/mcp", host, port)
-        try:
-            httpd.serve_forever(poll_interval=0.5)
-        except KeyboardInterrupt:
-            logger.info("MemPalace MCP HTTP server shutting down")
+    try:
+        with _MCPHTTPServer((host, port), _Handler) as httpd:
+            logger.info("MemPalace MCP HTTP server listening on http://%s:%s/mcp", host, port)
+            try:
+                httpd.serve_forever(poll_interval=0.5)
+            except KeyboardInterrupt:
+                logger.info("MemPalace MCP HTTP server shutting down")
+    except OSError as exc:
+        logger.error("Failed to start MCP HTTP server on %s:%s: %s", host, port, exc)
+        sys.exit(1)
 
 
 def _run_stdio_loop() -> None:
