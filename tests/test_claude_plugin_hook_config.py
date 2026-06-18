@@ -19,8 +19,14 @@ HOOK_CONFIG = REPO_ROOT / ".claude-plugin" / "hooks" / "hooks.json"
 # timeout of 60s in mempalace/hooks_cli.py. The hook-level floor of 60
 # keeps the inner bound from being truncated, and the ceiling of 90
 # bounds the worst case at ~30s above that.
+# SessionEnd backgrounds all of its work in the shell wrapper — the foreground
+# only forks the detached child and returns in milliseconds — so its timeout is
+# a generous backstop on a near-instant operation, not a synchronous-work bound
+# like Stop/PreCompact. A bound is still required (#1465) so a wedged fork can
+# never fall back to the 600s command default.
 EVENT_TIMEOUT_BOUNDS: dict[str, tuple[int, int]] = {
     "Stop": (10, 30),
+    "SessionEnd": (5, 30),
     "PreCompact": (60, 90),
     "SessionEnd": (60, 90),
 }

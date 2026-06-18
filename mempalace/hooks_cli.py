@@ -1,8 +1,8 @@
 """
-Hook logic for MemPalace — Python implementation of session-start, stop, and precompact hooks.
+Hook logic for MemPalace — Python implementation of session-start, stop, session-end, and precompact hooks.
 
 Reads JSON from stdin, outputs JSON to stdout.
-Supported hooks: session-start, stop, precompact
+Supported hooks: session-start, stop, session-end, precompact
 Supported harnesses: claude-code, codex (extensible to cursor, gemini, etc.)
 """
 
@@ -1021,6 +1021,113 @@ def hook_session_start(data: dict, harness: str):
     _output({})
 
 
+def _clear_session_last_save(session_id: str) -> None:
+    """Drop the per-session save marker once a session has ended.
+
+    ``hook_stop`` writes ``{session_id}_last_save`` but never had a clean-exit
+    cleanup path, so the marker lingered. The session is over by the time
+    ``hook_session_end`` runs, so removing it here keeps ``hook_state/`` from
+    accumulating dead markers. OS errors (including a missing marker, since
+    ``FileNotFoundError`` is an ``OSError``) are swallowed — this is best-effort
+    cleanup, never a reason to fail the hook.
+    """
+    try:
+        (STATE_DIR / f"{session_id}_last_save").unlink()
+    except OSError:
+        pass
+
+
+def hook_session_end(data: dict, harness: str):
+    """Session end hook: one final flush when a session exits cleanly.
+
+    Closes the gap (#1341) where a session that never crosses ``SAVE_INTERVAL``
+    on ``Stop`` and never triggers ``PreCompact`` exits with nothing saved —
+    the common case for short, useful sessions.
+
+    Why background instead of mine inline: Claude Code's hooks reference
+    documents a default SessionEnd timeout of 1.5 seconds, and "timeouts set on
+    plugin-provided hooks do not raise the budget"
+    (https://code.claude.com/docs/en/hooks). A cold ``mempalace`` start alone
+    exceeds 1.5s, so this handler must never mine in the hook foreground. The
+    shell wrapper backgrounds it and returns immediately; the heavy capture is
+    spawned *detached* via ``_ingest_transcript`` / ``_maybe_auto_ingest`` (both
+    route through ``_spawn_mine`` / ``_detached_popen_kwargs``). On POSIX that
+    detached child reliably outlives the session (verified). On Windows only the
+    mine grandchild (spawned with detached-process flags) is designed to break
+    away from the session; the backgrounded hook process and the in-process
+    diary write are best-effort there (no Windows CI coverage yet). This
+    honors the "background everything / hooks under 500ms" budget. SessionEnd
+    has no decision control, so this only ever saves; it never emits a block
+    payload.
+    """
+    if not _palace_root_exists():
+        _output({})
+        return
+
+    # Parse inside the try so a malformed payload (e.g. non-dict stdin that
+    # makes _parse_harness_input raise) still runs the finally cleanup below.
+    session_id = "unknown"
+    try:
+        parsed = _parse_harness_input(data, harness)
+        session_id = parsed["session_id"]
+        transcript_path = parsed["transcript_path"]
+
+        # Read config defensively (mirror hook_stop): a corrupt or unreadable
+        # config must not lose the final save, so default to auto-save on and
+        # toasts off rather than crashing the hook.
+        try:
+            config = MempalaceConfig()
+            auto_save = config.hooks_auto_save
+            toast = config.hook_desktop_toast
+        except Exception:
+            auto_save = True
+            toast = False
+
+        # Respect auto_save config toggle (clean opt-out)
+        if not auto_save:
+            _output({})
+            return
+
+        _log(f"SESSION END for session {session_id}")
+
+        # Validate the harness-provided transcript path before touching it
+        # (extension + ".." traversal check), mirroring the read path that
+        # already runs through _validate_transcript_path. A rejected path skips
+        # the transcript captures but still lets the independent MEMPAL_DIR mine
+        # run.
+        valid_transcript = ""
+        if transcript_path:
+            validated = _validate_transcript_path(transcript_path)
+            if validated is None:
+                _log(f"WARNING: transcript_path rejected by validator: {transcript_path!r}")
+            else:
+                valid_transcript = str(validated)
+
+        # Flush. The diary checkpoint (in-process ChromaDB write) runs FIRST,
+        # before any detached mine is spawned, so it never contends for the
+        # palace lock; this handler is already backgrounded by the wrapper, so it
+        # is not under the SessionEnd budget and has time to finish. The detached
+        # transcript ingest follows; re-mining a transcript ``Stop`` already
+        # captured is a near no-op (deterministic convo IDs + ``file_already_mined``
+        # short-circuit + upsert). ``reason`` is intentionally not branched on:
+        # every clean-exit reason (incl. ``/clear`` / ``resume``) warrants the
+        # flush. Order matches ``hook_stop``.
+        if valid_transcript:
+            _save_diary_direct(
+                valid_transcript,
+                session_id,
+                wing=_wing_from_transcript_path(valid_transcript),
+                toast=toast,
+                agent_name=_diary_agent_for_harness(harness),
+            )
+            _ingest_transcript(valid_transcript)
+        _maybe_auto_ingest()
+
+        _output({})
+    finally:
+        _clear_session_last_save(session_id)
+
+
 def hook_precompact(data: dict, harness: str):
     """Precompact hook: mine transcript synchronously, then allow compaction.
 
@@ -1064,6 +1171,7 @@ def run_hook(hook_name: str, harness: str):
     hooks = {
         "session-start": hook_session_start,
         "stop": hook_stop,
+        "session-end": hook_session_end,
         "precompact": hook_precompact,
     }
 
