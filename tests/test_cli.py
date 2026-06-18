@@ -166,6 +166,13 @@ def test_cmd_hook_calls_run_hook():
         mock_run.assert_called_once_with(hook_name="session-start", harness="claude-code")
 
 
+def test_cmd_hook_session_end_calls_run_hook():
+    args = argparse.Namespace(hook="session-end", harness="claude-code")
+    with patch("mempalace.hooks_cli.run_hook") as mock_run:
+        cmd_hook(args)
+        mock_run.assert_called_once_with(hook_name="session-end", harness="claude-code")
+
+
 # ── cmd_init ───────────────────────────────────────────────────────────
 
 
@@ -865,6 +872,18 @@ def test_main_hook_run_dispatches():
         patch(
             "sys.argv",
             ["mempalace", "hook", "run", "--hook", "session-start", "--harness", "claude-code"],
+        ),
+        patch("mempalace.cli.cmd_hook") as mock_cmd,
+    ):
+        main()
+        mock_cmd.assert_called_once()
+
+
+def test_main_hook_run_dispatches_session_end():
+    with (
+        patch(
+            "sys.argv",
+            ["mempalace", "hook", "run", "--hook", "session-end", "--harness", "claude-code"],
         ),
         patch("mempalace.cli.cmd_hook") as mock_cmd,
     ):

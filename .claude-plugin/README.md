@@ -41,9 +41,10 @@ After installing the plugin, run the init command to complete setup (installs th
 
 ## Hooks
 
-MemPalace registers two hooks that run automatically:
+MemPalace registers three hooks that run automatically:
 
 - **Stop** -- Saves conversation context every 15 messages.
+- **SessionEnd** -- Runs one final save in the background on a clean exit, so short sessions that never hit the Stop interval or a compaction are still captured.
 - **PreCompact** -- Preserves important memories before context compaction.
 
 Set the `MEMPAL_DIR` environment variable to a directory path to automatically run `mempalace mine` on that directory during each save trigger.

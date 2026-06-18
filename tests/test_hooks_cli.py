@@ -28,6 +28,7 @@ from mempalace.hooks_cli import (
     _wing_from_transcript_path,
     hook_stop,
     hook_session_start,
+    hook_session_end,
     hook_precompact,
     run_hook,
     _claim_mine_slot,
@@ -1779,6 +1780,284 @@ def test_hook_stop_does_not_create_palace_dir_when_absent(tmp_path, monkeypatch)
         )
     assert json.loads(buf.getvalue() or "{}") == {}
     assert not fake_root.exists()
+
+
+# ── session-end hook (#1341) ──────────────────────────────────────────────
+
+
+def test_run_hook_dispatches_session_end():
+    stdin_data = json.dumps({"session_id": "run-test"})
+    with patch("sys.stdin", io.StringIO(stdin_data)):
+        with patch("mempalace.hooks_cli.hook_session_end") as mock_hook:
+            run_hook("session-end", "claude-code")
+    mock_hook.assert_called_once_with({"session_id": "run-test"}, "claude-code")
+
+
+def test_session_end_uses_detached_paths_not_sync_mine(tmp_path):
+    """SessionEnd must spawn the detached ingest/auto-ingest and NEVER call the
+    synchronous ``_mine_sync``: the foreground SessionEnd budget (~1.5s, which a
+    plugin-provided per-hook timeout cannot raise) would kill a synchronous mine
+    before it saved anything.
+    """
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(3)],
+    )
+    last_save_file = tmp_path / "sess_last_save"
+    last_save_file.write_text("2", encoding="utf-8")
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = True
+        mock_cfg_cls.return_value.hook_desktop_toast = False
+        with (
+            patch(
+                "mempalace.hooks_cli._save_diary_direct",
+                return_value={"count": 3, "themes": ["exit"]},
+            ) as mock_save,
+            patch("mempalace.hooks_cli._ingest_transcript") as mock_ingest,
+            patch("mempalace.hooks_cli._maybe_auto_ingest") as mock_auto,
+            patch("mempalace.hooks_cli._mine_sync") as mock_sync,
+        ):
+            result = _capture_hook_output(
+                hook_session_end,
+                {"session_id": "sess", "transcript_path": str(transcript)},
+                state_dir=tmp_path,
+            )
+    assert result == {}
+    expected_path = str(transcript.resolve())
+    mock_ingest.assert_called_once_with(expected_path)
+    mock_auto.assert_called_once()
+    mock_sync.assert_not_called()
+    mock_save.assert_called_once_with(
+        expected_path, "sess", wing="wing_sessions", toast=False, agent_name="claude"
+    )
+    # The session is over; its per-session save marker is cleared.
+    assert not last_save_file.exists()
+
+
+def test_session_end_disabled_by_config_clears_marker(tmp_path):
+    last_save_file = tmp_path / "sess_last_save"
+    last_save_file.write_text("15", encoding="utf-8")
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = False
+        with (
+            patch("mempalace.hooks_cli._save_diary_direct") as mock_save,
+            patch("mempalace.hooks_cli._ingest_transcript") as mock_ingest,
+            patch("mempalace.hooks_cli._maybe_auto_ingest") as mock_auto,
+        ):
+            result = _capture_hook_output(
+                hook_session_end,
+                {"session_id": "sess", "transcript_path": ""},
+                state_dir=tmp_path,
+            )
+    assert result == {}
+    mock_save.assert_not_called()
+    mock_ingest.assert_not_called()
+    mock_auto.assert_not_called()
+    assert not last_save_file.exists()
+
+
+def test_session_end_defaults_to_saving_when_config_unreadable(tmp_path):
+    """A corrupt/unreadable config must not lose the final save: the handler
+    defaults to auto-save on (toasts off) instead of crashing the hook."""
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(transcript, [{"message": {"role": "user", "content": "hi"}}])
+    with patch("mempalace.hooks_cli.MempalaceConfig", side_effect=RuntimeError("corrupt config")):
+        with (
+            patch(
+                "mempalace.hooks_cli._save_diary_direct",
+                return_value={"count": 1, "themes": []},
+            ) as mock_save,
+            patch("mempalace.hooks_cli._ingest_transcript") as mock_ingest,
+            patch("mempalace.hooks_cli._maybe_auto_ingest") as mock_auto,
+        ):
+            result = _capture_hook_output(
+                hook_session_end,
+                {"session_id": "cfg", "transcript_path": str(transcript)},
+                state_dir=tmp_path,
+            )
+    assert result == {}
+    mock_save.assert_called_once()
+    mock_ingest.assert_called_once()
+    mock_auto.assert_called_once()
+
+
+def test_session_end_clears_marker_even_if_capture_raises(tmp_path):
+    """Marker cleanup runs in a ``finally`` so a failing ingest still cleans up
+    and never wedges the per-session marker on."""
+    last_save_file = tmp_path / "boom_last_save"
+    last_save_file.write_text("5", encoding="utf-8")
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = True
+        mock_cfg_cls.return_value.hook_desktop_toast = False
+        with (
+            patch("mempalace.hooks_cli.STATE_DIR", tmp_path),
+            patch(
+                "mempalace.hooks_cli._ingest_transcript",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch("mempalace.hooks_cli._output"),
+        ):
+            with pytest.raises(RuntimeError):
+                hook_session_end(
+                    {"session_id": "boom", "transcript_path": str(tmp_path / "x.jsonl")},
+                    "claude-code",
+                )
+    assert not last_save_file.exists()
+
+
+def test_session_end_clears_marker_on_parse_failure(tmp_path):
+    """A non-dict payload makes _parse_harness_input raise, but parsing now runs
+    inside the try, so the finally still clears the default-session marker
+    instead of skipping cleanup entirely."""
+    last_save_file = tmp_path / "unknown_last_save"
+    last_save_file.write_text("5", encoding="utf-8")
+    with (
+        patch("mempalace.hooks_cli.STATE_DIR", tmp_path),
+        patch("mempalace.hooks_cli._output"),
+    ):
+        with pytest.raises(AttributeError):
+            hook_session_end(["not", "a", "dict"], "claude-code")
+    assert not last_save_file.exists()
+
+
+def test_hook_session_end_does_not_create_palace_dir_when_absent(tmp_path, monkeypatch):
+    fake_root = _redirect_palace_root(monkeypatch, tmp_path)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        hook_session_end({"session_id": "absent", "transcript_path": ""}, "claude-code")
+    assert json.loads(buf.getvalue() or "{}") == {}
+    assert not fake_root.exists()
+
+
+def test_session_end_auto_ingest_only_when_no_transcript(tmp_path):
+    """auto_save on but no transcript: project mine still fires, transcript-only
+    paths are skipped, and the marker is still cleared. Guards against wrapping
+    ``_maybe_auto_ingest`` inside the ``if transcript_path`` block by mistake."""
+    last_save_file = tmp_path / "sess_last_save"
+    last_save_file.write_text("3", encoding="utf-8")
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = True
+        mock_cfg_cls.return_value.hook_desktop_toast = False
+        with (
+            patch("mempalace.hooks_cli._ingest_transcript") as mock_ingest,
+            patch("mempalace.hooks_cli._maybe_auto_ingest") as mock_auto,
+            patch("mempalace.hooks_cli._save_diary_direct") as mock_save,
+            patch("mempalace.hooks_cli._mine_sync") as mock_sync,
+        ):
+            result = _capture_hook_output(
+                hook_session_end,
+                {"session_id": "sess", "transcript_path": ""},
+                state_dir=tmp_path,
+            )
+    assert result == {}
+    mock_auto.assert_called_once()
+    mock_ingest.assert_not_called()
+    mock_save.assert_not_called()
+    mock_sync.assert_not_called()
+    assert not last_save_file.exists()
+
+
+def test_session_end_rejects_invalid_transcript_path(tmp_path):
+    """A traversal / wrong-suffix transcript_path is rejected by the validator:
+    no transcript ingest or diary write fires (the independent project mine
+    still runs), and the per-session marker is still cleared."""
+    last_save_file = tmp_path / "bad_last_save"
+    last_save_file.write_text("5", encoding="utf-8")
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = True
+        mock_cfg_cls.return_value.hook_desktop_toast = False
+        with (
+            patch("mempalace.hooks_cli._ingest_transcript") as mock_ingest,
+            patch("mempalace.hooks_cli._save_diary_direct") as mock_save,
+            patch("mempalace.hooks_cli._maybe_auto_ingest") as mock_auto,
+        ):
+            result = _capture_hook_output(
+                hook_session_end,
+                {"session_id": "bad", "transcript_path": "../../etc/passwd"},
+                state_dir=tmp_path,
+            )
+    assert result == {}
+    mock_ingest.assert_not_called()
+    mock_save.assert_not_called()
+    mock_auto.assert_called_once()  # project mine is independent of the transcript
+    assert not last_save_file.exists()
+
+
+def test_session_end_accepts_full_sessionend_payload(tmp_path):
+    """The handler tolerates the real Claude Code SessionEnd stdin (reason,
+    hook_event_name, cwd) — extra keys ignored, behavior unchanged. Pins the
+    contract so a future strict-parse or reason-branching regression is caught."""
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(transcript, [{"message": {"role": "user", "content": "hi"}}])
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = True
+        mock_cfg_cls.return_value.hook_desktop_toast = False
+        with (
+            patch(
+                "mempalace.hooks_cli._save_diary_direct",
+                return_value={"count": 1, "themes": []},
+            ),
+            patch("mempalace.hooks_cli._ingest_transcript") as mock_ingest,
+            patch("mempalace.hooks_cli._maybe_auto_ingest") as mock_auto,
+            patch("mempalace.hooks_cli._mine_sync") as mock_sync,
+        ):
+            result = _capture_hook_output(
+                hook_session_end,
+                {
+                    "session_id": "sess",
+                    "transcript_path": str(transcript),
+                    "hook_event_name": "SessionEnd",
+                    "reason": "logout",
+                    "cwd": str(tmp_path),
+                },
+                state_dir=tmp_path,
+            )
+    assert result == {}
+    mock_ingest.assert_called_once_with(str(transcript.resolve()))
+    mock_auto.assert_called_once()
+    mock_sync.assert_not_called()
+
+
+def test_session_end_checkpoint_visible_to_diary_read(
+    monkeypatch, config, palace_path, kg, tmp_path
+):
+    """The SessionEnd in-process diary checkpoint is real and discoverable via
+    diary_read (not mocked) — the diary half of #1341's clean-exit capture,
+    mirroring test_stop_hook_checkpoint_visible_to_diary_read."""
+    import chromadb
+
+    from mempalace import mcp_server
+    from mempalace.mcp_server import tool_diary_read
+
+    monkeypatch.setattr(mcp_server, "_config", config)
+    monkeypatch.setattr(mcp_server, "_get_kg", lambda *a, **kw: kg)
+    client = chromadb.PersistentClient(path=palace_path)
+    client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
+    del client
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(5)],
+    )
+
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = True
+        mock_cfg_cls.return_value.hook_desktop_toast = False
+        # Mock only the detached subprocess mines; run the REAL diary write.
+        with (
+            patch("mempalace.hooks_cli._ingest_transcript"),
+            patch("mempalace.hooks_cli._maybe_auto_ingest"),
+        ):
+            hook_session_end(
+                {"session_id": "sessX", "transcript_path": str(transcript)},
+                "claude-code",
+            )
+
+    visible = tool_diary_read(agent_name="claude")
+    assert visible.get("total", 0) >= 1
+    assert "CHECKPOINT" in visible["entries"][0]["content"]
 
 
 def test_hook_precompact_does_not_create_palace_dir_when_absent(tmp_path, monkeypatch):
