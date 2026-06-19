@@ -28,7 +28,6 @@ EVENT_TIMEOUT_BOUNDS: dict[str, tuple[int, int]] = {
     "Stop": (10, 30),
     "SessionEnd": (5, 30),
     "PreCompact": (60, 90),
-    "SessionEnd": (60, 90),
 }
 
 
@@ -95,13 +94,13 @@ def test_no_unbounded_events_in_plugin_config(hook_config: dict) -> None:
     )
 
 
-def test_session_end_hook_runs_precompact_mine(hook_config: dict) -> None:
-    """Claude SessionEnd should perform the same deterministic mine as PreCompact."""
+def test_session_end_hook_uses_background_wrapper(hook_config: dict) -> None:
+    """Claude SessionEnd should use the backgrounding wrapper, not PreCompact."""
     events = hook_config.get("hooks", {})
 
     assert "SessionEnd" in events
     assert "PreCompact" in events
-    assert events["SessionEnd"] == events["PreCompact"]
+    assert events["SessionEnd"] != events["PreCompact"]
 
     commands = [
         hook["command"]
@@ -109,4 +108,6 @@ def test_session_end_hook_runs_precompact_mine(hook_config: dict) -> None:
         for hook in entry.get("hooks", [])
         if hook.get("type") == "command"
     ]
-    assert any("mempal-precompact-hook.sh" in command for command in commands)
+
+    assert any("mempal-session-end-hook.sh" in command for command in commands)
+    assert not any("mempal-precompact-hook.sh" in command for command in commands)

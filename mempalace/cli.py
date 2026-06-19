@@ -53,6 +53,12 @@ _PASS_ZERO_LLM_PER_SAMPLE = 2_000  # for Tier 2 LLM call only
 _PASS_ZERO_LLM_MAX_SAMPLES = 20  # caps the LLM-tier sample count
 _EXPLICIT_BACKEND_ENV = "MEMPALACE_BACKEND_EXPLICIT"
 
+# Keep parser construction lightweight for --version and hook commands.
+# This mirrors miner.MAX_CHUNKS_PER_FILE without importing miner here;
+# importing miner pulls in Chroma dependencies before argparse can handle
+# lightweight exits such as --version.
+_CLI_MAX_CHUNKS_PER_FILE_DEFAULT = 50_000
+
 
 def _backend_arg(args):
     """Return a CLI-selected backend from subcommand or global flags."""
@@ -1486,7 +1492,6 @@ def main():
         default="exchange",
         help="Extraction strategy for convos mode: 'exchange' (default) or 'general' (5 memory types)",
     )
-    from . import miner as _miner_for_default
 
     p_mine.add_argument(
         "--max-chunks-per-file",
@@ -1495,7 +1500,7 @@ def main():
         metavar="N",
         help=(
             f"Per-file chunk cap; files producing more chunks are skipped with a "
-            f"summary counter. Default {_miner_for_default.MAX_CHUNKS_PER_FILE} "
+            f"summary counter. Default {_CLI_MAX_CHUNKS_PER_FILE_DEFAULT} "
             f"(or MEMPALACE_MAX_CHUNKS_PER_FILE). Set 0 to disable. Lower this on "
             f"Windows if you hit ONNX bad_alloc (#1455)."
         ),
