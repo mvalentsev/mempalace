@@ -1097,7 +1097,10 @@ def hook_session_end(data: dict, harness: str):
         # run.
         valid_transcript = ""
         if transcript_path:
-            validated = _validate_transcript_path(transcript_path)
+            try:
+                validated = _validate_transcript_path(transcript_path)
+            except OSError:
+                validated = None
             if validated is None:
                 _log(f"WARNING: transcript_path rejected by validator: {transcript_path!r}")
             else:
