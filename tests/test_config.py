@@ -690,6 +690,36 @@ def test_hooks_auto_save_env_override_true():
         del os.environ["MEMPALACE_HOOKS_AUTO_SAVE"]
 
 
+def test_hook_use_daemon_default_false(monkeypatch):
+    monkeypatch.delenv("MEMPALACE_HOOKS_DAEMON", raising=False)
+    cfg = MempalaceConfig(config_dir=tempfile.mkdtemp())
+    assert cfg.hook_use_daemon is False
+
+
+def test_hook_use_daemon_from_config(monkeypatch, tmp_path):
+    monkeypatch.delenv("MEMPALACE_HOOKS_DAEMON", raising=False)
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"hooks": {"daemon": True}}, f)
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.hook_use_daemon is True
+
+
+def test_hook_use_daemon_string_config(monkeypatch, tmp_path):
+    monkeypatch.delenv("MEMPALACE_HOOKS_DAEMON", raising=False)
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"hooks": {"daemon": "yes"}}, f)
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.hook_use_daemon is True
+
+
+def test_hook_use_daemon_env_override(monkeypatch, tmp_path):
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"hooks": {"daemon": False}}, f)
+    monkeypatch.setenv("MEMPALACE_HOOKS_DAEMON", "yes")
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.hook_use_daemon is True
+
+
 # --- max_backups (backup retention) ---
 
 

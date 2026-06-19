@@ -749,6 +749,19 @@ class MempalaceConfig:
         """Whether the stop hook shows a desktop notification via notify-send."""
         return self._file_config.get("hooks", {}).get("desktop_toast", False)
 
+    @property
+    def hook_use_daemon(self):
+        """Whether hooks should submit save/mine work to the opt-in daemon."""
+        env_val = os.environ.get("MEMPALACE_HOOKS_DAEMON")
+        if env_val is not None:
+            return env_val.lower() in ("true", "1", "yes", "on")
+        value = self._file_config.get("hooks", {}).get("daemon", False)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes", "on")
+        return value == 1
+
     def set_hook_setting(self, key: str, value: bool):
         """Update a hook setting and write config to disk."""
         if "hooks" not in self._file_config:

@@ -509,6 +509,70 @@ def _spawn_mine(cmd: list) -> None:
         pass
 
 
+def _hooks_daemon_enabled() -> bool:
+    try:
+        return MempalaceConfig().hook_use_daemon is True
+    except Exception:
+        return False
+
+
+def _daemon_mine_dedupe_key(source: str, mode: str) -> str:
+    try:
+        source_key = str(Path(source).expanduser().resolve())
+    except OSError:
+        source_key = str(Path(source).expanduser())
+    return f"hook:mine:{mode}:{source_key}"
+
+
+def _daemon_available() -> bool:
+    """True iff a daemon is already running for the configured palace.
+
+    This is a fast localhost health check, not a spawn: the 500ms hook budget
+    forbids auto-starting a python subprocess from a hook (cold start is
+    ~15s). Daemon mode for hooks requires the user to have started the daemon
+    explicitly via `mempalace daemon start`; when it isn't up, hooks fall back
+    to the existing direct (in-process / spawn) path instead of blocking.
+    """
+    from .daemon import get_client_if_running
+
+    try:
+        return get_client_if_running(MempalaceConfig().palace_path) is not None
+    except Exception:
+        return False
+
+
+def _submit_daemon_job(
+    kind: str,
+    payload: dict,
+    *,
+    dedupe_key: str | None = None,
+    priority: int = 0,
+    wait: bool = False,
+    timeout: float = 60.0,
+):
+    """Submit to an already-running daemon. Never auto-starts (see _daemon_available).
+
+    Raises DaemonError on a real failure (job rejected, timeout, daemon died
+    mid-submit). Callers must NOT fall back to the direct path on such errors —
+    the daemon may already have accepted the job, and re-running it would
+    duplicate verbatim content. Only an absent daemon (handled by the caller's
+    _daemon_available() precheck) should fall back.
+    """
+    from .daemon import submit_job
+
+    palace_path = MempalaceConfig().palace_path
+    return submit_job(
+        kind,
+        payload,
+        palace_path=palace_path,
+        dedupe_key=dedupe_key,
+        priority=priority,
+        wait=wait,
+        auto_start=False,
+        timeout=timeout,
+    )
+
+
 def _maybe_auto_ingest():
     """Background-mine MEMPAL_DIR (project files) if set.
 
@@ -527,9 +591,26 @@ def _maybe_auto_ingest():
         return
     for mine_dir, mode in targets:
         try:
+            if _hooks_daemon_enabled() and _daemon_available():
+                try:
+                    _submit_daemon_job(
+                        "mine",
+                        {"source": mine_dir, "mode": mode, "agent": "mempalace"},
+                        dedupe_key=_daemon_mine_dedupe_key(mine_dir, mode),
+                        wait=False,
+                    )
+                except Exception as exc:
+                    # Daemon accepted context — don't fall back (would double-mine).
+                    _log(f"Daemon mine submission failed: {exc}")
+                continue
             _spawn_mine([_mempalace_python(), "-m", "mempalace", "mine", mine_dir, "--mode", mode])
         except OSError:
             pass
+        except Exception as exc:
+            # Non-daemon spawn path failed. Hooks must never crash the user's
+            # shell — log and continue. Do not label this a daemon failure: the
+            # daemon block above handles its own errors with its own message.
+            _log(f"mine hook failed: {exc}")
 
 
 def _mine_sync():
@@ -546,6 +627,22 @@ def _mine_sync():
     log_path = STATE_DIR / "hook.log"
     for mine_dir, mode in targets:
         try:
+            if _hooks_daemon_enabled() and _daemon_available():
+                try:
+                    job = _submit_daemon_job(
+                        "mine",
+                        {"source": mine_dir, "mode": mode, "agent": "mempalace"},
+                        dedupe_key=_daemon_mine_dedupe_key(mine_dir, mode),
+                        wait=True,
+                        timeout=60,
+                    )
+                    result = job.get("result") or {}
+                    if job.get("state") != "succeeded" or not result.get("success", True):
+                        _log(f"Daemon sync mine failed: {result.get('error', job.get('error'))}")
+                except Exception as exc:
+                    # Daemon accepted context — don't fall back (would double-mine).
+                    _log(f"Daemon sync mine submission failed: {exc}")
+                continue
             with open(log_path, "a") as log_f:
                 subprocess.run(
                     [
@@ -563,6 +660,11 @@ def _mine_sync():
                 )
         except (OSError, subprocess.TimeoutExpired):
             pass
+        except Exception as exc:
+            # Non-daemon sync spawn path failed. Hooks must never crash the
+            # user's shell — log and continue (not a daemon failure; the daemon
+            # block above handles its own errors).
+            _log(f"mine hook failed: {exc}")
 
 
 def _desktop_toast(body: str, title: str = "MemPalace"):
@@ -680,6 +782,41 @@ def _save_diary_direct(
     )
 
     try:
+        if _hooks_daemon_enabled() and _daemon_available():
+            try:
+                job = _submit_daemon_job(
+                    "diary_write",
+                    {
+                        "agent_name": agent_name,
+                        "entry": entry,
+                        "topic": "checkpoint",
+                        "wing": wing,
+                    },
+                    priority=10,
+                    wait=True,
+                    timeout=30,
+                )
+            except Exception as exc:
+                # Daemon accepted context — don't fall back (would double-write).
+                _log(f"Daemon diary checkpoint failed: {exc}")
+                return {"count": 0}
+            result = job.get("result") or {}
+            if job.get("state") == "succeeded" and result.get("success"):
+                _log(f"Diary checkpoint saved: {result.get('entry_id', '?')}")
+                try:
+                    ack_file = STATE_DIR / "last_checkpoint"
+                    ack_file.write_text(
+                        json.dumps({"msgs": len(messages), "ts": now.isoformat()}),
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    pass
+                if toast:
+                    _desktop_toast(f"Checkpoint saved - {len(messages)} messages archived")
+                return {"count": len(messages), "themes": themes}
+            _log(f"Daemon diary checkpoint failed: {result.get('error', job.get('error'))}")
+            return {"count": 0}
+
         from .mcp_server import tool_diary_write
 
         result = tool_diary_write(
@@ -721,6 +858,25 @@ def _ingest_transcript(transcript_path: str):
         return
 
     try:
+        if _hooks_daemon_enabled() and _daemon_available():
+            try:
+                _submit_daemon_job(
+                    "mine",
+                    {
+                        "source": str(path.parent),
+                        "mode": "convos",
+                        "wing": "sessions",
+                        "agent": "mempalace",
+                    },
+                    dedupe_key=_daemon_mine_dedupe_key(str(path.parent), "convos"),
+                    wait=False,
+                )
+                _log(f"Transcript ingest submitted to daemon: {path.name}")
+            except Exception as exc:
+                # Daemon accepted context — don't fall back (would double-mine).
+                _log(f"Daemon transcript ingest failed: {exc}")
+            return
+
         # Route through ``_spawn_mine`` so the per-target PID guard kicks
         # in here too — repeated Stop/PreCompact fires for the same
         # transcript should not stack up parallel ingest mines.
@@ -740,6 +896,11 @@ def _ingest_transcript(transcript_path: str):
         _log(f"Transcript ingest started: {path.name}")
     except OSError:
         pass
+    except Exception as exc:
+        # Non-daemon ingest spawn path failed. Hooks must never crash the
+        # user's shell — log and continue (not a daemon failure; the daemon
+        # block above handles its own errors).
+        _log(f"transcript ingest hook failed: {exc}")
 
 
 SUPPORTED_HARNESSES = {"claude-code", "codex"}

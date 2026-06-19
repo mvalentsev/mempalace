@@ -16,6 +16,7 @@ from mempalace.hooks_cli import (
     _diary_agent_for_harness,
     _extract_recent_messages,
     _get_mine_targets,
+    _hooks_daemon_enabled,
     _log,
     _maybe_auto_ingest,
     _mempalace_python,
@@ -467,6 +468,45 @@ def test_stop_hook_checkpoint_visible_to_diary_read(monkeypatch, config, palace_
     assert legacy.get("entries") == []
 
 
+def test_save_diary_direct_daemon_opt_in_submits_job(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"message {i}"}} for i in range(3)],
+    )
+    env = {"MEMPALACE_HOOKS_DAEMON": "yes", "MEMPALACE_PALACE_PATH": str(palace_dir)}
+    job = {"id": "job", "state": "succeeded", "result": {"success": True, "entry_id": "e1"}}
+
+    with patch.dict("os.environ", env):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.hooks_cli._daemon_available", return_value=True):
+                with patch("mempalace.daemon.submit_job", return_value=job) as mock_submit:
+                    result = _save_diary_direct(
+                        str(transcript),
+                        "sess1",
+                        wing="wing_project",
+                        agent_name="claude",
+                    )
+
+    assert result["count"] == 3
+    mock_submit.assert_called_once()
+    assert mock_submit.call_args.args[0] == "diary_write"
+    payload = mock_submit.call_args.args[1]
+    assert payload["agent_name"] == "claude"
+    assert payload["wing"] == "wing_project"
+    assert payload["topic"] == "checkpoint"
+    assert (tmp_path / "last_checkpoint").exists()
+
+
+def test_hooks_daemon_enabled_requires_explicit_true():
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        assert _hooks_daemon_enabled() is False
+        mock_cfg_cls.return_value.hook_use_daemon = True
+        assert _hooks_daemon_enabled() is True
+
+
 # --- hook_session_start ---
 
 
@@ -786,6 +826,33 @@ def test_maybe_auto_ingest_with_env(tmp_path):
                     assert "mine" in cmd
                     assert str(mempal_dir.resolve()) in cmd
                     assert cmd[cmd.index("--mode") + 1] == "projects"
+
+
+def test_maybe_auto_ingest_daemon_opt_in_submits_job(tmp_path):
+    """Daemon-enabled hooks submit a background mine instead of spawning one."""
+    mempal_dir = tmp_path / "project"
+    palace_dir = tmp_path / "palace"
+    mempal_dir.mkdir()
+    palace_dir.mkdir()
+    env = {
+        "MEMPAL_DIR": str(mempal_dir),
+        "MEMPALACE_HOOKS_DAEMON": "yes",
+        "MEMPALACE_PALACE_PATH": str(palace_dir),
+    }
+    with patch.dict("os.environ", env):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.hooks_cli._daemon_available", return_value=True):
+                with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
+                    with patch(
+                        "mempalace.daemon.submit_job", return_value={"id": "job"}
+                    ) as mock_submit:
+                        _maybe_auto_ingest()
+
+    mock_popen.assert_not_called()
+    mock_submit.assert_called_once()
+    assert mock_submit.call_args.args[0] == "mine"
+    assert mock_submit.call_args.args[1]["source"] == str(mempal_dir.resolve())
+    assert mock_submit.call_args.kwargs["wait"] is False
 
 
 def test_maybe_auto_ingest_uses_mempalace_python(tmp_path):
@@ -1112,6 +1179,31 @@ def test_ingest_transcript_uses_detached_kwargs(tmp_path):
                 kwargs = mock_popen.call_args.kwargs
                 assert kwargs.get("stdin") is subprocess.DEVNULL
                 assert kwargs.get("close_fds") is True
+
+
+def test_ingest_transcript_daemon_opt_in_submits_job(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    transcript.write_text("x" * 200)
+    env = {"MEMPALACE_HOOKS_DAEMON": "yes", "MEMPALACE_PALACE_PATH": str(palace_dir)}
+    with patch.dict("os.environ", env):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.hooks_cli._daemon_available", return_value=True):
+                with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
+                    with patch(
+                        "mempalace.daemon.submit_job", return_value={"id": "job"}
+                    ) as mock_submit:
+                        from mempalace.hooks_cli import _ingest_transcript
+
+                        _ingest_transcript(str(transcript))
+
+    mock_popen.assert_not_called()
+    mock_submit.assert_called_once()
+    payload = mock_submit.call_args.args[1]
+    assert payload["source"] == str(tmp_path)
+    assert payload["mode"] == "convos"
+    assert payload["wing"] == "sessions"
 
 
 def test_ingest_transcript_skips_when_target_running(tmp_path):
