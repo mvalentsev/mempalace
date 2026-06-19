@@ -224,6 +224,24 @@ _MCP_IDLE_HOURS_ENV = "MEMPALACE_MCP_IDLE_HOURS"
 _MCP_IDLE_HOURS_DEFAULT = 8.0
 _last_request_time: float = time.monotonic()
 
+# MCP startup/open SQLite integrity gate (#1818).
+#
+# The peer-writer guard prevents new concurrent writers, but an MCP server can
+# still start against a palace that was already left corrupt by a prior writer
+# crash/kill. Run the existing read-only SQLite quick_check once on startup/open
+# and fail loudly instead of silently serving a malformed FTS5/HNSW index.
+_sqlite_integrity_checked = False
+_sqlite_integrity_errors: list[str] = []
+_sqlite_integrity_check_error = ""
+_SQLITE_INTEGRITY_ERROR_CODE = -32002
+_SQLITE_INTEGRITY_ALLOWED_TOOLS = frozenset(
+    {
+        "mempalace_status",
+        "mempalace_reconnect",
+    }
+)
+
+
 # MCP peer-writer guard (#1818).
 #
 # The existing per-operation palace lock serializes individual writes, but it
@@ -330,6 +348,108 @@ def _mcp_peer_writer_refusal(req_id, tool_name: str):
                 "palace": _config.palace_path,
                 "reason": reason,
                 "override_env": _MCP_ALLOW_PEER_WRITER_ENV,
+            },
+        },
+    }
+
+
+def _refresh_sqlite_integrity_status() -> None:
+    """Refresh the MCP startup SQLite/FTS5 integrity gate.
+
+    Uses repair.sqlite_integrity_errors(), which is read-only and already backs
+    repair preflight. A failure here is treated as an integrity failure so the
+    server does not proceed silently after a malformed FTS5 index or other
+    SQLite-layer corruption (#1818).
+    """
+
+    global _sqlite_integrity_checked
+    global _sqlite_integrity_errors
+    global _sqlite_integrity_check_error
+
+    if not _is_chroma_backend():
+        _sqlite_integrity_checked = True
+        _sqlite_integrity_errors = []
+        _sqlite_integrity_check_error = ""
+        return
+
+    try:
+        from .repair import sqlite_integrity_errors
+
+        errors = sqlite_integrity_errors(_config.palace_path)
+    except Exception as exc:
+        _sqlite_integrity_check_error = (
+            f"sqlite integrity probe failed: {type(exc).__name__}: {exc}"
+        )
+        _sqlite_integrity_errors = [_sqlite_integrity_check_error]
+    else:
+        _sqlite_integrity_errors = [str(error) for error in errors if str(error)]
+        _sqlite_integrity_check_error = ""
+
+    _sqlite_integrity_checked = True
+
+    if _sqlite_integrity_errors:
+        logger.error(
+            "SQLite integrity check failed for palace=%s: %s",
+            _config.palace_path,
+            "; ".join(_sqlite_integrity_errors[:3]),
+        )
+
+
+def _ensure_sqlite_integrity_status() -> None:
+    if not _sqlite_integrity_checked:
+        _refresh_sqlite_integrity_status()
+
+
+def _sqlite_integrity_payload() -> dict:
+    _ensure_sqlite_integrity_status()
+
+    payload = {
+        "checked": _sqlite_integrity_checked,
+        "ok": not _sqlite_integrity_errors,
+        "palace": _config.palace_path,
+        "sqlite_path": os.path.join(_config.palace_path, "chroma.sqlite3"),
+        "error_count": len(_sqlite_integrity_errors),
+        "errors": _sqlite_integrity_errors[:10],
+    }
+
+    if len(_sqlite_integrity_errors) > 10:
+        payload["truncated"] = len(_sqlite_integrity_errors) - 10
+
+    if _sqlite_integrity_check_error:
+        payload["check_error"] = _sqlite_integrity_check_error
+
+    return payload
+
+
+def _mcp_sqlite_integrity_refusal(req_id, tool_name: str):
+    if tool_name in _SQLITE_INTEGRITY_ALLOWED_TOOLS:
+        return None
+
+    _ensure_sqlite_integrity_status()
+
+    if not _sqlite_integrity_errors:
+        return None
+
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {
+            "code": _SQLITE_INTEGRITY_ERROR_CODE,
+            "message": (
+                "Palace SQLite integrity check failed; refusing tool call "
+                "until the palace is repaired"
+            ),
+            "data": {
+                "tool": tool_name,
+                "palace": _config.palace_path,
+                "sqlite_path": os.path.join(_config.palace_path, "chroma.sqlite3"),
+                "errors": _sqlite_integrity_errors[:10],
+                "error_count": len(_sqlite_integrity_errors),
+                "hint": (
+                    "Stop all MemPalace MCP clients/writers, back up the palace, "
+                    "repair the SQLite/FTS5 corruption offline, then run "
+                    "mempalace_reconnect or restart the MCP server."
+                ),
             },
         },
     }
@@ -1155,6 +1275,16 @@ def _tool_status_via_sqlite() -> dict:
 
 
 def tool_status():
+    _ensure_sqlite_integrity_status()
+    if _sqlite_integrity_errors:
+        result = _tool_status_via_sqlite()
+        if isinstance(result, dict):
+            result["sqlite_integrity"] = _sqlite_integrity_payload()
+            result["sqlite_integrity_failed"] = True
+            result["error"] = "SQLite integrity check failed"
+            result["partial"] = True
+        return result
+
     # Run the safe sqlite/pickle probe before we touch chromadb. In the
     # #1222 failure mode, opening the persistent client to call .count()
     # can segfault — short-circuit to a pure-sqlite path when divergence
@@ -2874,6 +3004,24 @@ def tool_reconnect():
             except Exception:
                 pass
         _kg_by_path.clear()
+    _refresh_sqlite_integrity_status()
+    if _sqlite_integrity_errors:
+        result = {
+            "success": False,
+            "message": "SQLite integrity check failed after reconnect",
+            "sqlite_integrity": _sqlite_integrity_payload(),
+            "vector_disabled": _vector_disabled,
+            "vector_disabled_reason": _vector_disabled_reason,
+            "hint": (
+                "Stop all MemPalace MCP clients/writers, back up the palace, "
+                "repair the SQLite/FTS5 corruption offline, then run "
+                "mempalace_reconnect or restart the MCP server."
+            ),
+        }
+        if close_errors:
+            result["error"] = "; ".join(close_errors)
+        return result
+
     try:
         col = _get_collection()
         if col is None:
@@ -3478,6 +3626,25 @@ def _internal_tool_error(req_id, tool_name: str, exc: BaseException = None) -> d
     }
 
 
+def _mcp_tool_preflight_refusal(req_id, tool_name: str):
+    """Run MCP request preflight gates outside handle_request complexity."""
+
+    sqlite_integrity_error = _mcp_sqlite_integrity_refusal(req_id, tool_name)
+    if sqlite_integrity_error is not None:
+        return sqlite_integrity_error
+
+    return _mcp_peer_writer_refusal(req_id, tool_name)
+
+
+def _decorate_mcp_tool_result(tool_name: str, result):
+    """Attach MCP transport-only diagnostics outside handle_request complexity."""
+
+    if tool_name == "mempalace_status" and isinstance(result, dict):
+        result.setdefault("sqlite_integrity", _sqlite_integrity_payload())
+
+    return result
+
+
 def handle_request(request):
     global _last_request_time
     if not isinstance(request, dict):
@@ -3596,9 +3763,9 @@ def handle_request(request):
                     "error": {"code": -32602, "message": f"Invalid value for parameter '{key}'"},
                 }
         tool_args.pop("wait_for_previous", None)
-        peer_writer_error = _mcp_peer_writer_refusal(req_id, tool_name)
-        if peer_writer_error is not None:
-            return peer_writer_error
+        preflight_error = _mcp_tool_preflight_refusal(req_id, tool_name)
+        if preflight_error is not None:
+            return preflight_error
 
         # 'content' is an accepted alias for diary_write's 'entry' (callers often
         # reuse add_drawer's 'content' name). Map it in here, before dispatch, so a
@@ -3612,7 +3779,8 @@ def handle_request(request):
             if "entry" not in tool_args or tool_args["entry"] is None:
                 tool_args["entry"] = content_val
         try:
-            result = TOOLS[tool_name]["handler"](**tool_args)
+            result = _decorate_mcp_tool_result(tool_name, TOOLS[tool_name]["handler"](**tool_args))
+
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -3898,6 +4066,7 @@ def main():
     # Pre-flight: probe HNSW capacity before any tool call so the warning
     # is visible at startup rather than on first use (#1222). Pure
     # filesystem read; never opens a chromadb client.
+    _refresh_sqlite_integrity_status()
     _refresh_vector_disabled_flag()
     # Opt-in: pre-load the embedder so the first chromadb-write tool call
     # does not pay the ONNX/CoreML cold-load tax under the MCP client

@@ -3944,3 +3944,126 @@ def test_peer_writer_lock_setup_failure_is_cached(monkeypatch):
     assert mcp_server._MCP_WRITER_LOCK_FAILED is True
     assert "continuing without peer-writer protection" in reason_first
     assert reason_second == reason_first
+
+
+def test_sqlite_integrity_gate_refuses_non_status_tool(monkeypatch):
+    from mempalace import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_checked", True)
+    monkeypatch.setattr(
+        mcp_server,
+        "_sqlite_integrity_errors",
+        ["malformed inverted index for FTS5 table main.embedding_fulltext_search"],
+    )
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
+
+    response = mcp_server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 1818,
+            "method": "tools/call",
+            "params": {"name": "mempalace_list_wings", "arguments": {}},
+        }
+    )
+
+    assert response["error"]["code"] == mcp_server._SQLITE_INTEGRITY_ERROR_CODE
+    assert "integrity check failed" in response["error"]["message"]
+    assert response["error"]["data"]["tool"] == "mempalace_list_wings"
+    assert "malformed inverted index" in response["error"]["data"]["errors"][0]
+
+
+def test_sqlite_integrity_status_surfaces_payload_without_chroma(monkeypatch):
+    import json
+
+    from mempalace import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_checked", True)
+    monkeypatch.setattr(
+        mcp_server,
+        "_sqlite_integrity_errors",
+        ["malformed inverted index for FTS5 table main.embedding_fulltext_search"],
+    )
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
+    monkeypatch.setattr(
+        mcp_server,
+        "_tool_status_via_sqlite",
+        lambda: {"total_drawers": 123, "backend": "chroma"},
+    )
+
+    response = mcp_server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 1819,
+            "method": "tools/call",
+            "params": {"name": "mempalace_status", "arguments": {}},
+        }
+    )
+
+    payload = json.loads(response["result"]["content"][0]["text"])
+
+    assert payload["total_drawers"] == 123
+    assert payload["sqlite_integrity_failed"] is True
+    assert payload["sqlite_integrity"]["ok"] is False
+    assert payload["sqlite_integrity"]["error_count"] == 1
+    assert "malformed inverted index" in payload["sqlite_integrity"]["errors"][0]
+
+
+def test_sqlite_integrity_reconnect_allowed_when_corrupt(monkeypatch):
+    from mempalace import mcp_server
+
+    called = {"value": False}
+
+    def fake_reconnect():
+        called["value"] = True
+        return {"success": True}
+
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_checked", True)
+    monkeypatch.setattr(
+        mcp_server,
+        "_sqlite_integrity_errors",
+        ["malformed inverted index for FTS5 table main.embedding_fulltext_search"],
+    )
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
+    monkeypatch.setitem(
+        mcp_server.TOOLS,
+        "mempalace_reconnect",
+        {
+            "description": "test reconnect",
+            "input_schema": {"type": "object", "properties": {}},
+            "handler": fake_reconnect,
+        },
+    )
+
+    response = mcp_server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 1820,
+            "method": "tools/call",
+            "params": {"name": "mempalace_reconnect", "arguments": {}},
+        }
+    )
+
+    assert called["value"] is True
+    assert '"success": true' in response["result"]["content"][0]["text"]
+
+
+def test_refresh_sqlite_integrity_status_records_quick_check_errors(monkeypatch):
+    from mempalace import mcp_server, repair
+
+    monkeypatch.setattr(mcp_server, "_is_chroma_backend", lambda: True)
+    monkeypatch.setattr(
+        repair,
+        "sqlite_integrity_errors",
+        lambda palace_path: [
+            "malformed inverted index for FTS5 table main.embedding_fulltext_search"
+        ],
+    )
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_checked", False)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_errors", [])
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
+
+    mcp_server._refresh_sqlite_integrity_status()
+
+    assert mcp_server._sqlite_integrity_checked is True
+    assert len(mcp_server._sqlite_integrity_errors) == 1
+    assert "malformed inverted index" in mcp_server._sqlite_integrity_errors[0]
