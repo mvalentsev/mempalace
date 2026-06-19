@@ -534,6 +534,27 @@ def cmd_mine(args):
     for raw in args.include_ignored or []:
         include_ignored.extend(part.strip() for part in raw.split(",") if part.strip())
 
+    if getattr(args, "background", False) and not getattr(args, "daemon", False):
+        print("mempalace: --background requires --daemon", file=sys.stderr)
+        sys.exit(2)
+
+    if getattr(args, "daemon", False):
+        payload = {
+            "source": args.dir,
+            "mode": args.mode,
+            "wing": args.wing,
+            "agent": args.agent,
+            "limit": args.limit,
+            "dry_run": args.dry_run,
+            "extract": args.extract,
+            "no_gitignore": args.no_gitignore,
+            "include_ignored": include_ignored,
+            "max_chunks_per_file": getattr(args, "max_chunks_per_file", None),
+            "redetect_origin": getattr(args, "redetect_origin", False),
+        }
+        _submit_daemon_cli_job("mine", payload, args, background=getattr(args, "background", False))
+        return
+
     # --redetect-origin re-runs corpus_origin on the current corpus state
     # and overwrites <palace>/.mempalace/origin.json before mining proceeds.
     # Heuristic-only by design — full LLM detection lives on `mempalace init`.
@@ -655,13 +676,27 @@ def cmd_sweep(args):
 
 def cmd_sync(args):
     """Prune drawers whose source files are gitignored, deleted, or moved (#1252)."""
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+
+    if getattr(args, "background", False) and not getattr(args, "daemon", False):
+        print("mempalace: --background requires --daemon", file=sys.stderr)
+        sys.exit(2)
+
+    if getattr(args, "daemon", False):
+        payload = {
+            "dir": args.dir,
+            "root": list(args.root or []),
+            "wing": args.wing,
+            "dry_run": args.dry_run,
+        }
+        _submit_daemon_cli_job("sync", payload, args, background=getattr(args, "background", False))
+        return
+
     from .mcp_server import _wal_log
     from .palace import MineAlreadyRunning
     from .backends import detect_backend_for_path
     from .palace import _backend_artifact_label, resolve_backend_name
     from .sync import sync_palace
-
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
 
     if not os.path.isdir(palace_path):
         print(f"\n  No palace found at {palace_path}")
@@ -743,6 +778,133 @@ def cmd_sync(args):
         )
 
     print(f"\n{'=' * 55}\n")
+
+
+def _submit_daemon_cli_job(kind: str, payload: dict, args, *, background: bool) -> None:
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    backend = _backend_arg(args)
+    from .daemon import DaemonError, submit_job
+
+    try:
+        job = submit_job(
+            kind,
+            payload,
+            palace_path=palace_path,
+            backend=backend,
+            wait=not background,
+            auto_start=True,
+        )
+    except DaemonError as exc:
+        print(f"mempalace: daemon submission failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if background:
+        print(f"Submitted daemon job {job['id']} ({kind})")
+        return
+
+    result = job.get("result") or {}
+    from .service import print_job_result
+
+    exit_code = print_job_result(result)
+    if job.get("state") != "succeeded" and exit_code == 0:
+        error = job.get("error") or {}
+        print(
+            f"mempalace: daemon job failed: {error.get('message', 'unknown error')}",
+            file=sys.stderr,
+        )
+        exit_code = 1
+    if exit_code:
+        sys.exit(exit_code)
+
+
+def cmd_daemon(args):
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    backend = _backend_arg(args)
+    from .daemon import (
+        TERMINAL_STATES,
+        DaemonError,
+        QueueStore,
+        get_client_if_running,
+        job_to_dict,
+        queue_path,
+        start_daemon,
+        stop_daemon,
+    )
+
+    action = getattr(args, "daemon_action", None)
+    try:
+        if action == "start":
+            if args.foreground:
+                start_daemon(palace_path, backend=backend, foreground=True)
+                return
+            client = start_daemon(palace_path, backend=backend, foreground=False)
+            health = client.health()
+            print(f"MemPalace daemon running on 127.0.0.1:{client.port}")
+            print(f"  Palace: {health.get('palace_path')}")
+            print(f"  PID:    {health.get('pid')}")
+            return
+
+        if action == "stop":
+            if stop_daemon(palace_path):
+                print("MemPalace daemon stopping")
+            else:
+                print("MemPalace daemon is not running")
+            return
+
+        if action == "status":
+            client = get_client_if_running(palace_path)
+            if client is None:
+                print("MemPalace daemon is not running")
+                sys.exit(1)
+            health = client.health()
+            print("MemPalace daemon is running")
+            print(f"  Palace: {health.get('palace_path')}")
+            print(f"  PID:    {health.get('pid')}")
+            print(f"  Active: {health.get('active_job_id') or '-'}")
+            print(f"  Jobs:   {health.get('counts') or {}}")
+            return
+
+        if action == "jobs":
+            client = get_client_if_running(palace_path)
+            if client is not None:
+                jobs = client.list_jobs(limit=args.limit)
+            else:
+                qpath = queue_path(palace_path)
+                if not qpath.exists():
+                    jobs = []
+                else:
+                    jobs = [
+                        job_to_dict(job, include_payload=False)
+                        for job in QueueStore(qpath).list(args.limit)
+                    ]
+            for job in jobs:
+                print(f"{job['id']}  {job['state']:<9}  {job['kind']:<10}  {job['created_at']}")
+            return
+
+        if action == "wait":
+            client = get_client_if_running(palace_path)
+            if client is not None:
+                job = client.wait(args.job_id)
+            else:
+                qpath = queue_path(palace_path)
+                if not qpath.exists():
+                    raise DaemonError("daemon is not running")
+                job = job_to_dict(QueueStore(qpath).get(args.job_id))
+                if job.get("state") not in TERMINAL_STATES:
+                    raise DaemonError(f"daemon is not running; job {args.job_id} is {job['state']}")
+            result = job.get("result") or {}
+            from .service import print_job_result
+
+            exit_code = print_job_result(result)
+            if job.get("state") != "succeeded" and exit_code == 0:
+                print(f"mempalace: daemon job failed: {job.get('error')}", file=sys.stderr)
+                exit_code = 1
+            if exit_code:
+                sys.exit(exit_code)
+            return
+    except DaemonError as exc:
+        print(f"mempalace: daemon error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_search(args):
@@ -1481,6 +1643,16 @@ def main():
         "--dry-run", action="store_true", help="Show what would be filed without filing"
     )
     p_mine.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Submit this mine to the opt-in local daemon queue",
+    )
+    p_mine.add_argument(
+        "--background",
+        action="store_true",
+        help="With --daemon, return a job id immediately instead of waiting",
+    )
+    p_mine.add_argument(
         "--extract",
         choices=["exchange", "general"],
         default="exchange",
@@ -1542,6 +1714,16 @@ def main():
         dest="dry_run",
         action="store_false",
         help="Actually delete drawers (overrides --dry-run; requires --wing or a project root)",
+    )
+    p_sync.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Submit this sync to the opt-in local daemon queue",
+    )
+    p_sync.add_argument(
+        "--background",
+        action="store_true",
+        help="With --daemon, return a job id immediately instead of waiting",
     )
 
     # search
@@ -1705,6 +1887,27 @@ def main():
         help="Compare sqlite vs HNSW element counts (read-only; never opens a chromadb client)",
     )
 
+    # daemon
+    p_daemon = sub.add_parser("daemon", help="Manage the opt-in long-lived daemon")
+    daemon_sub = p_daemon.add_subparsers(dest="daemon_action")
+    p_daemon_start = daemon_sub.add_parser("start", help="Start the daemon")
+    p_daemon_start.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run in the foreground for debugging or process supervisors",
+    )
+    p_daemon_start.add_argument(
+        "--backend",
+        default=None,
+        help="Storage backend for this daemon (default: config/env/detected/chroma)",
+    )
+    daemon_sub.add_parser("stop", help="Stop the daemon")
+    daemon_sub.add_parser("status", help="Show daemon status")
+    p_daemon_jobs = daemon_sub.add_parser("jobs", help="List recent daemon jobs")
+    p_daemon_jobs.add_argument("--limit", type=int, default=20, help="Max jobs to show")
+    p_daemon_wait = daemon_sub.add_parser("wait", help="Wait for a daemon job")
+    p_daemon_wait.add_argument("job_id", help="Job id returned by --background")
+
     # mcp
     p_mcp = sub.add_parser(
         "mcp",
@@ -1804,6 +2007,13 @@ def main():
             cmd_palace_set_embedder(args)
         else:
             p_palace.print_help()
+        return
+
+    if args.command == "daemon":
+        if not getattr(args, "daemon_action", None):
+            p_daemon.print_help()
+            return
+        cmd_daemon(args)
         return
 
     dispatch = {
