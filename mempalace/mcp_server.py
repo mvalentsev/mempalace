@@ -1048,7 +1048,7 @@ def _sqlite_graph_stats():
     # graph_stats degrades to build_graph() rather than raising — mirroring the
     # sibling sqlite fast paths (_sqlite_taxonomy / _sqlite_wing_room_counts).
     try:
-        conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = _sqlite3.connect(sqlite_read_uri(db_path), uri=True)
         try:
             conn.execute("PRAGMA busy_timeout = 3000")
             if (
