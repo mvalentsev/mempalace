@@ -88,7 +88,10 @@ from the agent (it can break other live clients):
 
 1. Stop the MCP server (kill the `mempalace-mcp` process, or restart the
    host editor).
-2. Optional backup: `cp -a ~/.mempalace/palace ~/.mempalace/palace.bak.$(date +%F)`
+2. Optional backup of the palace directory (`--archive-existing` already
+   moves the old palace aside, so this is belt-and-suspenders):
+   - macOS / Linux: `cp -a ~/.mempalace/palace ~/.mempalace/palace.bak.$(date +%F)`
+   - Windows (PowerShell): `Copy-Item -Recurse "$env:USERPROFILE\.mempalace\palace" "$env:USERPROFILE\.mempalace\palace.bak"`
 3. Rebuild from SQLite:
    `mempalace repair --mode from-sqlite --archive-existing --yes`
 4. Verify: `mempalace repair-status` (divergence should read 0).
