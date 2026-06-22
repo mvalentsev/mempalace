@@ -852,7 +852,22 @@ def _safe_meta(meta):
 
 
 def _fetch_all_metadata(col, where=None):
-    """Paginate col.get() to avoid the 10K silent truncation limit."""
+    """Fetch every matching record's metadata via the backend's best strategy.
+
+    Delegates to BaseCollection.get_all_metadata() (#1796), which Chroma
+    satisfies with the same offset-paginated loop this function used to do
+    inline, and which Qdrant overrides with a single _scroll_all() pass.
+    Routing through one contract method means every backend gets its own
+    correct strategy without this caller needing to know which backend it's
+    talking to.
+    """
+    get_all = getattr(col, "get_all_metadata", None)
+    if callable(get_all):
+        return get_all(where=where)
+
+    # Defensive fallback for any collection object that predates the
+    # get_all_metadata() contract method (e.g. a third-party backend not yet
+    # updated). Preserves the exact previous behavior.
     total = col.count()
     all_meta = []
     offset = 0
