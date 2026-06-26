@@ -521,6 +521,10 @@ class TestColdStartDiagnostics:
         assert "MEMPALACE-DOTTED-LINE-xyz" in body, body
         assert "MEMPALACE-FLAT-LINE-xyz" in body, body
         assert "HOST-ONLY-LINE-xyz" not in body, body
+        # Format is "%(message)s" in the embedded path too: the line is the bare
+        # message with no "LEVEL:name:" prefix (the file handler sets its own
+        # formatter, independent of basicConfig which never runs here).
+        assert any(line == "MEMPALACE-FLAT-LINE-xyz" for line in body.splitlines()), body
 
     def test_embedded_host_warning_root_gates_mempalace_info(self, tmp_path):
         """Documents the intentional embedded-mode level-gating tradeoff: when
@@ -564,6 +568,33 @@ class TestColdStartDiagnostics:
         body = log_path.read_text(encoding="utf-8")
         assert "MEMPALACE-STD-LINE-xyz" in body, body
         assert "THIRDPARTY-LINE-xyz" not in body, body
+
+    def test_reload_does_not_duplicate_file_handler(self, tmp_path):
+        """#1885 review: the idempotency guard must survive ``importlib.reload``,
+        not only a direct second call. A reload re-executes the module body; the
+        guard flag is restored from ``globals()`` so ``_init_logging`` early-exits
+        and does not stack a second ``FileHandler`` on root."""
+        log_path = tmp_path / "mcp.log"
+        marker = tmp_path / "counts.txt"
+        extra = (
+            "import logging, importlib, pathlib\n"
+            "from mempalace import mcp_server\n"
+            "def _nfile():\n"
+            "    return sum(\n"
+            "        isinstance(h, logging.FileHandler)\n"
+            "        for h in logging.getLogger().handlers\n"
+            "    )\n"
+            "_before = _nfile()\n"
+            "importlib.reload(mcp_server)\n"
+            "_after = _nfile()\n"
+            f"pathlib.Path({str(marker)!r}).write_text(f'{{_before}},{{_after}}')\n"
+            "raise SystemExit(0)\n"
+        )
+        result = self._run_main({"MEMPALACE_LOG_FILE": str(log_path)}, extra_code=extra)
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        before, after = marker.read_text().split(",")
+        assert before == "1", f"expected one file handler after import, got {before}"
+        assert after == "1", f"reload duplicated the file handler: {before}->{after}"
 
 
 # ── Protocol Layer ──────────────────────────────────────────────────────

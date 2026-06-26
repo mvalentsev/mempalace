@@ -118,7 +118,11 @@ class _MempalaceLogFilter(logging.Filter):
         return name == "mempalace" or name.startswith(("mempalace.", "mempalace_"))
 
 
-_logging_configured = False
+# Preserved across importlib.reload via globals(): a reload re-executes this
+# module body, so a plain ``= False`` would reset the guard and let
+# _init_logging() stack a duplicate file handler. globals().get keeps the prior
+# True so the guard survives reload (#1885 review).
+_logging_configured = globals().get("_logging_configured", False)
 
 
 def _init_logging() -> None:
@@ -187,6 +191,11 @@ def _init_logging() -> None:
     if log_file:
         try:
             file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+            # Pin the format: the embedded path never calls basicConfig, so set
+            # it here instead of relying on logging's default formatter. The
+            # default already renders "%(message)s", but the explicit set makes
+            # both paths identical and independent of that default (#1885 review).
+            file_handler.setFormatter(logging.Formatter("%(message)s"))
             # File is a mempalace-only diagnostic stream; keep host / library
             # records out so it stays useful when the handler rides on a
             # host-owned root logger (#1860).
