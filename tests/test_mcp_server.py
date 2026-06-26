@@ -108,8 +108,9 @@ class TestColdStartDiagnostics:
 
     Each test runs ``main()`` in a fresh ``subprocess`` because
 
-    * ``_init_logging`` uses ``logging.basicConfig(force=True)`` which
-      would otherwise reset pytest's ``caplog`` handlers across cases,
+    * ``_init_logging`` configures logging only at module import, so each
+      case needs a fresh interpreter to observe a pristine root logger and
+      configure host logging *before* importing the server,
     * ``ChromaBackend._resolve_embedding_function`` is a class-level
       attribute that test monkeypatching mutates globally,
     * The whole point of the new env vars is process-startup behaviour
@@ -457,6 +458,112 @@ class TestColdStartDiagnostics:
             f"if banner is first, FileHandler was opened lazily (delay=True regression). "
             f"stderr={result.stderr!r}"
         )
+
+    def test_host_root_logger_config_survives_import(self, tmp_path):
+        """#1860: importing the server must NOT clobber a host app's root
+        logger. ``_init_logging`` previously called
+        ``logging.basicConfig(force=True)`` at import, resetting root's
+        level, format, and handlers — silently overriding any app that
+        configured logging before importing ``mempalace.mcp_server``."""
+        marker = tmp_path / "rootstate.txt"
+        extra = (
+            "import logging, pathlib\n"
+            # Host app configures logging BEFORE importing mempalace.
+            "logging.basicConfig(level=logging.DEBUG, "
+            "format='HOST %(levelname)s %(message)s')\n"
+            "_sentinel = logging.NullHandler()\n"
+            "logging.getLogger().addHandler(_sentinel)\n"
+            "from mempalace import mcp_server  # noqa: F401 — triggers _init_logging()\n"
+            "_root = logging.getLogger()\n"
+            "_fmt = next((h.formatter._fmt for h in _root.handlers "
+            "if h.formatter is not None), None)\n"
+            f"pathlib.Path({str(marker)!r}).write_text(\n"
+            "    f'level={logging.getLevelName(_root.level)}|'\n"
+            "    f'sentinel={_sentinel in _root.handlers}|'\n"
+            "    f'nhandlers={len(_root.handlers)}|'\n"
+            "    f'fmt={_fmt!r}'\n"
+            ")\n"
+            "raise SystemExit(0)\n"
+        )
+        result = self._run_main({"MEMPALACE_LOG_FILE": None}, extra_code=extra)
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        state = marker.read_text()
+        # Root logger must remain exactly as the host configured it.
+        assert "level=DEBUG" in state, state
+        assert "sentinel=True" in state, state
+        # MEMPALACE_LOG_FILE unset + host owns root → mempalace adds no handler.
+        assert "nhandlers=2" in state, state
+        assert "fmt='HOST %(levelname)s %(message)s'" in state, state
+
+    def test_log_file_with_host_root_captures_mempalace_only(self, tmp_path):
+        """#1860 + #1495: when a host app owns the root logger and
+        MEMPALACE_LOG_FILE is set, the file still captures mempalace's own
+        records — including the dotted ``mempalace.*`` family (the cold-load
+        path) — but NOT the host's. Proves the additive, mempalace-filtered
+        file handler: a naive 'reset root' or 'single dedicated logger' fix
+        would either leak host logs into the file or drop the dotted family."""
+        log_path = tmp_path / "mcp.log"
+        extra = (
+            "import logging\n"
+            # Host owns root logging before the import.
+            "logging.basicConfig(level=logging.DEBUG, format='%(message)s')\n"
+            "from mempalace import mcp_server  # noqa: F401 — triggers _init_logging()\n"
+            "logging.getLogger('host.app').warning('HOST-ONLY-LINE-xyz')\n"
+            "logging.getLogger('mempalace.embedding').info('MEMPALACE-DOTTED-LINE-xyz')\n"
+            "logging.getLogger('mempalace_mcp').info('MEMPALACE-FLAT-LINE-xyz')\n"
+            "logging.shutdown()\n"
+            "raise SystemExit(0)\n"
+        )
+        result = self._run_main({"MEMPALACE_LOG_FILE": str(log_path)}, extra_code=extra)
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        assert log_path.exists(), f"log file missing; stderr={result.stderr!r}"
+        body = log_path.read_text(encoding="utf-8")
+        assert "MEMPALACE-DOTTED-LINE-xyz" in body, body
+        assert "MEMPALACE-FLAT-LINE-xyz" in body, body
+        assert "HOST-ONLY-LINE-xyz" not in body, body
+
+    def test_embedded_host_warning_root_gates_mempalace_info(self, tmp_path):
+        """Documents the intentional embedded-mode level-gating tradeoff: when
+        a host owns root at WARNING, mempalace INFO heartbeats do NOT reach
+        MEMPALACE_LOG_FILE (the file handler rides on the host-gated root), but
+        WARNING/ERROR cold-load failure diagnostics still do. #1860 never
+        raises the host's level; #1495's motivating case is a standalone launch
+        (root empty -> INFO pinned) and is unaffected."""
+        log_path = tmp_path / "mcp.log"
+        extra = (
+            "import logging\n"
+            "logging.basicConfig(level=logging.WARNING, format='%(message)s')\n"
+            "from mempalace import mcp_server  # noqa: F401 — triggers _init_logging()\n"
+            "logging.getLogger('mempalace_mcp').info('INFO-HEARTBEAT-xyz')\n"
+            "logging.getLogger('mempalace_mcp').warning('WARN-DIAG-xyz')\n"
+            "logging.shutdown()\n"
+            "raise SystemExit(0)\n"
+        )
+        result = self._run_main({"MEMPALACE_LOG_FILE": str(log_path)}, extra_code=extra)
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        body = log_path.read_text(encoding="utf-8")
+        assert "WARN-DIAG-xyz" in body, body
+        assert "INFO-HEARTBEAT-xyz" not in body, body
+
+    def test_standalone_log_file_excludes_third_party_records(self, tmp_path):
+        """The MEMPALACE_LOG_FILE stream is mempalace-only in standalone mode
+        too: third-party library records reaching the root logger are kept out
+        of the file by ``_MempalaceLogFilter`` (the file stays a clean
+        mempalace diagnostic stream)."""
+        log_path = tmp_path / "mcp.log"
+        extra = (
+            "import logging\n"
+            "from mempalace import mcp_server  # noqa: F401 — standalone: root starts empty\n"
+            "logging.getLogger('chromadb.fake').warning('THIRDPARTY-LINE-xyz')\n"
+            "logging.getLogger('mempalace.embedding').info('MEMPALACE-STD-LINE-xyz')\n"
+            "logging.shutdown()\n"
+            "raise SystemExit(0)\n"
+        )
+        result = self._run_main({"MEMPALACE_LOG_FILE": str(log_path)}, extra_code=extra)
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        body = log_path.read_text(encoding="utf-8")
+        assert "MEMPALACE-STD-LINE-xyz" in body, body
+        assert "THIRDPARTY-LINE-xyz" not in body, body
 
 
 # ── Protocol Layer ──────────────────────────────────────────────────────

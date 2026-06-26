@@ -101,63 +101,118 @@ from .collision_scan import assert_no_collisions  # noqa: E402
 from .ids import ID_RECIPE, make_drawer_id_from_content  # noqa: E402
 
 
-def _init_logging() -> None:
-    """Root-logger init: always stderr, optionally append to ``MEMPALACE_LOG_FILE``.
+class _MempalaceLogFilter(logging.Filter):
+    """Pass only records emitted by mempalace's own loggers.
 
-    Stderr-only is the default. When ``MEMPALACE_LOG_FILE`` is set, a
-    ``FileHandler`` is attached so MCP-client failures that the client
-    does not surface (e.g. the ``-32000`` cold-load timeout in #1495)
-    remain diagnosable from the file.
+    Lets the ``MEMPALACE_LOG_FILE`` handler attach to an already-configured
+    root logger (a host app embedding the server, #1860) without copying the
+    host's — or a third-party library's — records into mempalace's diagnostic
+    file. mempalace loggers are ``mempalace`` / ``mempalace.*`` (the dotted
+    ``__name__`` family) plus the flat ``mempalace_mcp`` /
+    ``mempalace_format_miner`` / ``mempalace_hallways`` / ``mempalace_graph``
+    loggers — every one is prefixed ``mempalace``.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        name = record.name
+        return name == "mempalace" or name.startswith(("mempalace.", "mempalace_"))
+
+
+_logging_configured = False
+
+
+def _init_logging() -> None:
+    """Configure mempalace logging: stderr by default, optional file append.
+
+    ``MEMPALACE_LOG_FILE``, when set, attaches a ``FileHandler`` so MCP-client
+    failures the client never surfaces (e.g. the ``-32000`` cold-load timeout
+    in #1495) stay diagnosable from the file.
+
+    Root-logger ownership (#1860). The server must not hijack a host
+    application's logging, so the two cases are handled differently:
+
+    * **Root unconfigured** (standalone ``mempalace-mcp``): own it — a stderr
+      handler (plus the optional file handler) via ``basicConfig`` at INFO.
+      The historical behaviour.
+    * **Root already configured** (an app imported ``mempalace.mcp_server``
+      after setting up its own logging): leave the host's level, format, and
+      handlers untouched. Attach only the file handler, filtered to
+      mempalace's own records (`_MempalaceLogFilter`), so the host's logs do
+      not bleed into mempalace's file. With ``MEMPALACE_LOG_FILE`` unset the
+      root logger is not touched at all.
+
+    Previously this called ``logging.basicConfig(..., force=True)``, which
+    reset root's handlers/level/format unconditionally and silently clobbered
+    any host app that had configured logging first (#1860). ``force`` existed
+    (#1495) only to stop ``basicConfig`` no-op'ing when handlers already
+    existed; the filtered additive handler preserves that diagnostic contract
+    without the collateral reset.
+
+    The file handler is mempalace-filtered in both paths, so the file is a
+    clean mempalace-only stream. In the embedded path mempalace's records are
+    still subject to the host's root level — a host wanting INFO diagnostics in
+    the file should not raise root above INFO. The standalone path pins INFO.
 
     Failure modes:
 
-    * Invalid path (missing directory, no perms, Windows NUL byte) →
-      stderr-only with a warning. The env var must not become a new
-      server-start failure surface — that would defeat the diagnostic
-      goal. ``ValueError`` is included in the catch because Windows
-      raises it for paths with embedded NUL bytes, not ``OSError``.
-    * Root logger already configured (host app embedding the server,
-      transitive imports touching ``logging``) → ``force=True`` resets
-      the handlers so MEMPALACE_LOG_FILE's contract holds regardless
-      of what touched root logging first. Without ``force=True``,
-      ``basicConfig`` is a no-op when handlers exist and the env var
-      silently does nothing — exactly the diagnostic black hole #1495
-      exists to close.
-    * Concurrent writers (multiple ``mempalace-mcp`` processes pointing
-      at the same path) interleave at the line level. The handler uses
-      append mode so nothing is overwritten, but operators running
-      Claude Code + Claude Desktop simultaneously should give each
-      process its own log path.
+    * Invalid path (missing directory, no perms, Windows NUL byte) → the file
+      handler is skipped with a warning naming ``MEMPALACE_LOG_FILE``; the
+      server still starts. ``ValueError`` is in the catch because Windows
+      raises it for embedded-NUL paths, not ``OSError``.
+    * Concurrent writers (multiple ``mempalace-mcp`` processes at one path)
+      interleave at the line level; append mode means nothing is overwritten,
+      but give each process its own path.
 
-    ``delay=True`` is intentionally NOT set: deferring the open means an
-    invalid path raises at ``emit()`` time (unhandled), defeating the
-    fail-soft contract. With eager open the same error surfaces inside
-    ``FileHandler.__init__`` and lands in our ``except`` below.
+    ``delay=True`` is intentionally NOT set: deferring the open moves an
+    invalid-path error to ``emit()`` time (unhandled), defeating the fail-soft
+    contract. Eager open lands the same error in ``FileHandler.__init__`` and
+    our ``except`` below.
 
-    Module-level invocation: this function runs at import time, preserving
-    the side effect of the previous module-level ``logging.basicConfig``
-    call. Callers that import ``mempalace.mcp_server`` for introspection
-    (``TOOLS`` dict, handler functions) inherit the reset; this matches
-    pre-PR behaviour and is intentional for an MCP entry-point module.
+    Runs at import time (module-level call below) so importing the module for
+    introspection (``TOOLS`` dict, handler functions) configures logging once.
     """
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    global _logging_configured
+    if _logging_configured:
+        # Idempotent: a second call (e.g. importlib.reload) must not add a
+        # duplicate file handler in the embedded path.
+        return
+    _logging_configured = True
+
     # MEMPALACE_LOG_FILE is operator-supplied and opt-in; this is a
     # local-first server (CLAUDE.md design principle), so no path
     # sanitization — the operator's process UID is the trust boundary.
     log_file = os.environ.get("MEMPALACE_LOG_FILE", "").strip()
+    file_handler: logging.Handler | None = None
     file_handler_error: Exception | None = None
     if log_file:
         try:
-            handlers.append(logging.FileHandler(log_file, mode="a", encoding="utf-8"))
+            file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+            # File is a mempalace-only diagnostic stream; keep host / library
+            # records out so it stays useful when the handler rides on a
+            # host-owned root logger (#1860).
+            file_handler.addFilter(_MempalaceLogFilter())
         except (OSError, ValueError) as exc:
             # Fail-soft: see "Invalid path" failure mode above. Broad on
             # (OSError, ValueError) because Windows raises ValueError for
             # NUL-byte paths while POSIX uses OSError for missing-dir / EPERM.
             file_handler_error = exc
-    logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=handlers, force=True)
+
+    root = logging.getLogger()
+    if root.handlers:
+        # A host app (or a transitive import) already owns root logging. Do
+        # NOT reset it (#1860) — only add our filtered file handler, if any.
+        if file_handler is not None:
+            root.addHandler(file_handler)
+    else:
+        # Standalone server: own the unconfigured root logger as before.
+        handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+        if file_handler is not None:
+            handlers.append(file_handler)
+        logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=handlers)
+
     if file_handler_error is not None:
         logging.getLogger("mempalace_mcp").warning(
-            "MEMPALACE_LOG_FILE=%r could not be opened (%s); using stderr only",
+            "MEMPALACE_LOG_FILE=%r could not be opened (%s); file logging disabled",
             log_file,
             file_handler_error,
         )
