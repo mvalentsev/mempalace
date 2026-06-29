@@ -410,7 +410,7 @@ class MilvusCollection(BaseCollection):
                     self._client,
                     self._remote_collection,
                     dimension,
-                    enable_native_lexical=self._backend._enable_native_lexical(self._config),
+                    enable_native_lexical=True,
                 )
                 self._backend._load_remote_collection(self._client, self._remote_collection)
                 self._known_dimension = dimension
@@ -1085,10 +1085,6 @@ class MilvusBackend(BaseBackend):
             self._clients[config] = client
             return client
 
-    @staticmethod
-    def _enable_native_lexical(config: _MilvusConfig) -> bool:
-        return bool(config.uri and _is_server_uri(config.uri))
-
     def get_collection(self, *args, **kwargs) -> MilvusCollection:
         palace, collection_name, create, options = self._normalize_args(args, kwargs)
         config = self._effective_config(palace, options)
@@ -1230,6 +1226,7 @@ class MilvusBackend(BaseBackend):
             datatype=DataType.VARCHAR,
             max_length=DOCUMENT_MAX_LENGTH,
             enable_analyzer=enable_native_lexical,
+            enable_match=enable_native_lexical,
         )
         schema.add_field(field_name=FIELD_METADATA, datatype=DataType.JSON)
         schema.add_field(

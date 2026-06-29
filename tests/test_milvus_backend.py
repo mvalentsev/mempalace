@@ -85,6 +85,7 @@ def test_milvus_lite_add_query_filter_lexical_and_marker(tmp_path):
         assert MilvusBackend.detect(palace.local_path)
         assert os.path.isfile(os.path.join(palace.local_path, "milvus_backend.json"))
         assert os.path.exists(os.path.join(palace.local_path, "milvus.db"))
+        assert col._has_native_lexical()
         assert col.count() == 3
 
         result = col.query(
