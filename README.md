@@ -109,11 +109,11 @@ CUDA-accelerated embeddings, build the GPU variant with
 ## Storage backends
 
 ChromaDB is the default. For the pluggable-backend preview, MemPalace also
-ships `sqlite_exact` for local exact-vector correctness checks, `milvus`
-(Milvus Lite by default, Milvus server / Zilliz Cloud when configured), and two
-other opt-in external service backends — `qdrant` (REST) and `pgvector`
-(Postgres). These backends exercise the storage contract on different
-substrates, so it is not accidentally shaped around one vendor.
+ships `sqlite_exact` for local exact-vector correctness checks and opt-in
+backends including `milvus` (Milvus Lite by default, Milvus server / Zilliz
+Cloud when configured), `qdrant` (REST), and `pgvector` (Postgres). These
+backends exercise the storage contract on different substrates, so it is not
+accidentally shaped around one vendor.
 
 ```bash
 # local no-service backend
@@ -139,8 +139,9 @@ MEMPALACE_PGVECTOR_DSN=postgresql://localhost:5432/mempalace \
   mempalace mine ~/projects/myapp --backend pgvector
 ```
 
-Milvus can also be configured with `MEMPALACE_MILVUS_NAMESPACE`; Qdrant with
-`MEMPALACE_QDRANT_API_KEY`, `MEMPALACE_QDRANT_NAMESPACE`, and
+Milvus can also be configured with `MEMPALACE_MILVUS_DB_NAME`,
+`MEMPALACE_MILVUS_NAMESPACE`, and `MEMPALACE_MILVUS_CONSISTENCY_LEVEL`;
+Qdrant with `MEMPALACE_QDRANT_API_KEY`, `MEMPALACE_QDRANT_NAMESPACE`, and
 `MEMPALACE_QDRANT_TIMEOUT`; pgvector with `MEMPALACE_PGVECTOR_NAMESPACE`.
 The server-capable backends isolate tenants by namespace (advertised via the
 `supports_namespace_isolation` capability) and write a local marker

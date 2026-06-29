@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import re
 import threading
@@ -23,7 +22,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from ..config import strip_lone_surrogates
+from ..config import DEFAULT_MILVUS_CONSISTENCY_LEVEL, strip_lone_surrogates
 from ._sidecar import EMBEDDER_SIDECAR_FILENAME, read_embedder_sidecar, write_embedder_sidecar
 from .base import (
     BackendClosedError,
@@ -49,6 +48,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_DB_FILENAME = "milvus.db"
 _MARKER_FILENAME = "milvus_backend.json"
 _MAX_QUERY_WINDOW = 16384
+_MILVUS_CONSISTENCY_LEVELS = {
+    "strong": "Strong",
+    "session": "Session",
+    "bounded": "Bounded",
+    "eventually": "Eventually",
+}
 
 FIELD_ID = "id"
 FIELD_DOCUMENT = "document"
@@ -68,8 +73,6 @@ RESERVED_FIELDS = {
 }
 
 _FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_TOKEN_RE = re.compile(r"\w{2,}", re.UNICODE)
-
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -239,45 +242,6 @@ def _jsonable_metadata(meta: dict | None) -> dict:
     return cleaned
 
 
-def _tokenize(text: str) -> list[str]:
-    if not text:
-        return []
-    return _TOKEN_RE.findall(text.lower())
-
-
-def _bm25_scores(query: str, documents: list[str], k1: float = 1.5, b: float = 0.75) -> list[float]:
-    query_terms = set(_tokenize(query))
-    n_docs = len(documents)
-    if not query_terms or n_docs == 0:
-        return [0.0] * n_docs
-    tokenized = [_tokenize(doc) for doc in documents]
-    lengths = [len(tokens) for tokens in tokenized]
-    if not any(lengths):
-        return [0.0] * n_docs
-    avgdl = sum(lengths) / n_docs or 1.0
-    df = {term: 0 for term in query_terms}
-    for tokens in tokenized:
-        for term in set(tokens) & query_terms:
-            df[term] += 1
-    idf = {
-        term: math.log((n_docs - count + 0.5) / (count + 0.5) + 1.0) for term, count in df.items()
-    }
-    scores = []
-    for tokens, length in zip(tokenized, lengths):
-        if length == 0:
-            scores.append(0.0)
-            continue
-        tf = {}
-        for token in tokens:
-            if token in query_terms:
-                tf[token] = tf.get(token, 0) + 1
-        score = 0.0
-        for term, freq in tf.items():
-            score += idf[term] * (freq * (k1 + 1)) / (freq + k1 * (1 - b + b * length / avgdl))
-        scores.append(score)
-    return scores
-
-
 def _slug(value: str, fallback: str = "collection") -> str:
     safe = re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_")
     if not safe or not re.match(r"^[A-Za-z_]", safe):
@@ -288,12 +252,23 @@ def _slug(value: str, fallback: str = "collection") -> str:
     return f"{safe[:107]}_{digest}"
 
 
+def _normalize_consistency_level(value: Any) -> str:
+    raw = DEFAULT_MILVUS_CONSISTENCY_LEVEL if value is None else str(value).strip()
+    normalized = _MILVUS_CONSISTENCY_LEVELS.get(raw.lower())
+    if normalized:
+        return normalized
+    allowed = ", ".join(_MILVUS_CONSISTENCY_LEVELS.values())
+    raise BackendError(f"milvus consistency_level must be one of: {allowed}")
+
+
 @dataclass(frozen=True)
 class _MilvusConfig:
     uri: Optional[str] = None
     token: Optional[str] = None
+    db_name: Optional[str] = None
     namespace: Optional[str] = None
     db_filename: str = DEFAULT_DB_FILENAME
+    consistency_level: str = DEFAULT_MILVUS_CONSISTENCY_LEVEL
 
     @classmethod
     def from_options(cls, options: Optional[dict] = None) -> "_MilvusConfig":
@@ -314,17 +289,29 @@ class _MilvusConfig:
             or os.environ.get("MEMPALACE_MILVUS_TOKEN")
             or getattr(cfg, "milvus_token", None)
         )
+        db_name = (
+            options.get("db_name")
+            or os.environ.get("MEMPALACE_MILVUS_DB_NAME")
+            or getattr(cfg, "milvus_db_name", None)
+        )
         namespace = (
             options.get("namespace")
             or os.environ.get("MEMPALACE_MILVUS_NAMESPACE")
             or getattr(cfg, "milvus_namespace", None)
         )
+        consistency_level = (
+            options.get("consistency_level")
+            or os.environ.get("MEMPALACE_MILVUS_CONSISTENCY_LEVEL")
+            or getattr(cfg, "milvus_consistency_level", DEFAULT_MILVUS_CONSISTENCY_LEVEL)
+        )
         db_filename = options.get("db_filename") or DEFAULT_DB_FILENAME
         return cls(
             uri=str(uri).strip() if uri else None,
             token=str(token) if token else None,
+            db_name=str(db_name).strip() if db_name else None,
             namespace=str(namespace).strip() if namespace else None,
             db_filename=str(db_filename).strip() or DEFAULT_DB_FILENAME,
+            consistency_level=_normalize_consistency_level(consistency_level),
         )
 
 
@@ -406,15 +393,15 @@ class MilvusCollection(BaseCollection):
                     )
                 return
             if not self._remote_exists():
-                native_lexical = self._backend._create_remote_collection(
+                self._backend._create_remote_collection(
                     self._client,
                     self._remote_collection,
                     dimension,
-                    enable_native_lexical=True,
+                    consistency_level=self._config.consistency_level,
                 )
                 self._backend._load_remote_collection(self._client, self._remote_collection)
                 self._known_dimension = dimension
-                self._known_native_lexical = native_lexical
+                self._known_native_lexical = True
                 self._backend._write_marker(self._palace, self._config)
                 return
             remote_dim = self._remote_dimension()
@@ -481,12 +468,6 @@ class MilvusCollection(BaseCollection):
         row[FIELD_ID] = str(doc_id)
         row["distance"] = float(score or 0.0)
         return row
-
-    def _flush(self) -> None:
-        try:
-            self._client.flush(collection_name=self._remote_collection)
-        except Exception:
-            logger.debug("Milvus flush skipped", exc_info=True)
 
     def _prepare_rows(
         self,
@@ -555,7 +536,6 @@ class MilvusCollection(BaseCollection):
                 raise ValueError(f"ids already exist in milvus collection: {existing.ids}")
         self._ensure_remote_collection(dimension)
         self._client.insert(collection_name=self._remote_collection, data=rows)
-        self._flush()
 
     def upsert(self, *, documents, ids, metadatas=None, embeddings=None):
         if embeddings is None:
@@ -570,7 +550,6 @@ class MilvusCollection(BaseCollection):
             return
         self._ensure_remote_collection(dimension)
         self._client.upsert(collection_name=self._remote_collection, data=rows)
-        self._flush()
 
     def update(self, *, ids, documents=None, metadatas=None, embeddings=None):
         if documents is None and metadatas is None and embeddings is None:
@@ -659,6 +638,7 @@ class MilvusCollection(BaseCollection):
                 "output_fields": output_fields,
                 "anns_field": FIELD_VECTOR,
                 "search_params": {"metric_type": "COSINE"},
+                "consistency_level": self._config.consistency_level,
             }
             if filter_expr:
                 kwargs["filter"] = filter_expr
@@ -703,6 +683,7 @@ class MilvusCollection(BaseCollection):
                 "collection_name": self._remote_collection,
                 "output_fields": fields,
                 "limit": int(limit),
+                "consistency_level": self._config.consistency_level,
             }
             if filter_expr:
                 kwargs["filter"] = filter_expr
@@ -714,6 +695,7 @@ class MilvusCollection(BaseCollection):
             "collection_name": self._remote_collection,
             "output_fields": fields,
             "batch_size": int(batch_size),
+            "consistency_level": self._config.consistency_level,
         }
         if filter_expr:
             kwargs["filter"] = filter_expr
@@ -762,6 +744,7 @@ class MilvusCollection(BaseCollection):
                 collection_name=self._remote_collection,
                 ids=list(ids),
                 output_fields=output_fields,
+                consistency_level=self._config.consistency_level,
             )
             by_id = {str(row.get(FIELD_ID)): row for row in records or []}
             rows = [by_id[str(doc_id)] for doc_id in ids if str(doc_id) in by_id]
@@ -811,7 +794,6 @@ class MilvusCollection(BaseCollection):
             self._client.delete(collection_name=self._remote_collection, ids=list(ids))
         else:
             self._client.delete(collection_name=self._remote_collection, filter=filter_expr)
-        self._flush()
 
     def count(self) -> int:
         if not self._remote_exists():
@@ -823,6 +805,7 @@ class MilvusCollection(BaseCollection):
                 collection_name=self._remote_collection,
                 filter="",
                 output_fields=["count(*)"],
+                consistency_level=self._config.consistency_level,
             )
             if rows:
                 first = rows[0]
@@ -837,31 +820,19 @@ class MilvusCollection(BaseCollection):
 
     def lexical_search(self, *, query: str, n_results: int = 10, where: Optional[dict] = None):
         filter_expr = translate_where(where)
-        if self._has_native_lexical():
-            native = self._native_lexical_search(
-                query=query,
-                n_results=n_results,
-                filter_expr=filter_expr,
+        if not self._remote_exists():
+            if self._marker_exists():
+                raise CollectionNotInitializedError(self._collection_name)
+            return LexicalResult(hits=[])
+        if not self._has_native_lexical():
+            raise BackendError(
+                "milvus lexical search requires a collection created with native BM25 support"
             )
-            if native is not None:
-                return native
-        rows = self._collect_by_filter(
+        return self._native_lexical_search(
+            query=query,
+            n_results=n_results,
             filter_expr=filter_expr,
-            output_fields=[FIELD_ID, FIELD_DOCUMENT, FIELD_METADATA],
         )
-        scores = _bm25_scores(query, [row.get(FIELD_DOCUMENT, "") for row in rows])
-        hits = [
-            LexicalHit(
-                id=str(row.get(FIELD_ID, "")),
-                document=row.get(FIELD_DOCUMENT, ""),
-                metadata=self._extract_metadata(row),
-                score=score,
-            )
-            for row, score in zip(rows, scores)
-            if score > 0
-        ]
-        hits.sort(key=lambda hit: hit.score, reverse=True)
-        return LexicalResult(hits=hits[:n_results])
 
     def _native_lexical_search(
         self,
@@ -869,7 +840,7 @@ class MilvusCollection(BaseCollection):
         query: str,
         n_results: int,
         filter_expr: str,
-    ) -> Optional[LexicalResult]:
+    ) -> LexicalResult:
         try:
             kwargs = {
                 "collection_name": self._remote_collection,
@@ -878,15 +849,13 @@ class MilvusCollection(BaseCollection):
                 "output_fields": [FIELD_ID, FIELD_DOCUMENT, FIELD_METADATA],
                 "limit": int(n_results),
                 "search_params": {"params": {}},
+                "consistency_level": self._config.consistency_level,
             }
             if filter_expr:
                 kwargs["filter"] = filter_expr
             raw = self._client.search(**kwargs)
-        except Exception:
-            logger.debug(
-                "Milvus native BM25 search failed; using local BM25 fallback", exc_info=True
-            )
-            return None
+        except Exception as exc:
+            raise BackendError("Milvus native BM25 search failed") from exc
         rows = [self._row_from_search_hit(hit) for hit in (raw[0] if raw else [])]
         return LexicalResult(
             hits=[
@@ -950,8 +919,10 @@ class MilvusBackend(BaseBackend):
             return _MilvusConfig(
                 uri=config.uri,
                 token=config.token,
+                db_name=config.db_name,
                 namespace=namespace,
                 db_filename=config.db_filename,
+                consistency_level=config.consistency_level,
             )
         if not palace.local_path:
             raise BackendError(
@@ -960,13 +931,16 @@ class MilvusBackend(BaseBackend):
         return _MilvusConfig(
             uri=os.path.join(palace.local_path, config.db_filename),
             token=config.token,
+            db_name=config.db_name,
             namespace=namespace,
             db_filename=config.db_filename,
+            consistency_level=config.consistency_level,
         )
 
     def _marker_target(self, palace: PalaceRef, config: _MilvusConfig) -> dict:
         return {
             "uri": config.uri,
+            "db_name": config.db_name,
             "namespace": config.namespace,
             "palace_hash": self._palace_hash(palace),
             "remote_prefix": self._remote_collection_prefix(palace=palace, config=config),
@@ -1024,7 +998,7 @@ class MilvusBackend(BaseBackend):
             raise BackendMismatchError(
                 "milvus marker target does not match current configuration "
                 f"({', '.join(mismatched)}); keep MEMPALACE_MILVUS_URI and "
-                "namespace consistent or use a fresh palace directory"
+                "Milvus database/namespace settings consistent or use a fresh palace directory"
             )
 
     def _write_marker(self, palace: PalaceRef, config: _MilvusConfig) -> None:
@@ -1081,6 +1055,8 @@ class MilvusBackend(BaseBackend):
             kwargs = {"uri": config.uri or DEFAULT_DB_FILENAME}
             if config.token:
                 kwargs["token"] = config.token
+            if config.db_name:
+                kwargs["db_name"] = config.db_name
             client = MilvusClient(**kwargs)
             self._clients[config] = client
             return client
@@ -1180,29 +1156,14 @@ class MilvusBackend(BaseBackend):
         collection_name: str,
         dimension: int,
         *,
-        enable_native_lexical: bool,
-    ) -> bool:
-        if enable_native_lexical:
-            try:
-                self._create_remote_collection_schema(
-                    client,
-                    collection_name,
-                    dimension,
-                    enable_native_lexical=True,
-                )
-                return True
-            except Exception:
-                logger.debug(
-                    "Milvus native BM25 schema creation failed; retrying dense-only schema",
-                    exc_info=True,
-                )
+        consistency_level: str,
+    ) -> None:
         self._create_remote_collection_schema(
             client,
             collection_name,
             dimension,
-            enable_native_lexical=False,
+            consistency_level=consistency_level,
         )
-        return False
 
     def _create_remote_collection_schema(
         self,
@@ -1210,7 +1171,7 @@ class MilvusBackend(BaseBackend):
         collection_name: str,
         dimension: int,
         *,
-        enable_native_lexical: bool,
+        consistency_level: str,
     ) -> None:
         from pymilvus import DataType
 
@@ -1225,8 +1186,8 @@ class MilvusBackend(BaseBackend):
             field_name=FIELD_DOCUMENT,
             datatype=DataType.VARCHAR,
             max_length=DOCUMENT_MAX_LENGTH,
-            enable_analyzer=enable_native_lexical,
-            enable_match=enable_native_lexical,
+            enable_analyzer=True,
+            enable_match=True,
         )
         schema.add_field(field_name=FIELD_METADATA, datatype=DataType.JSON)
         schema.add_field(
@@ -1234,35 +1195,34 @@ class MilvusBackend(BaseBackend):
             datatype=DataType.FLOAT_VECTOR,
             dim=int(dimension),
         )
-        if enable_native_lexical:
-            from pymilvus import Function, FunctionType
+        from pymilvus import Function, FunctionType
 
-            schema.add_field(field_name=FIELD_SPARSE, datatype=DataType.SPARSE_FLOAT_VECTOR)
-            schema.add_function(
-                Function(
-                    name="document_bm25",
-                    input_field_names=[FIELD_DOCUMENT],
-                    output_field_names=[FIELD_SPARSE],
-                    function_type=FunctionType.BM25,
-                )
+        schema.add_field(field_name=FIELD_SPARSE, datatype=DataType.SPARSE_FLOAT_VECTOR)
+        schema.add_function(
+            Function(
+                name="document_bm25",
+                input_field_names=[FIELD_DOCUMENT],
+                output_field_names=[FIELD_SPARSE],
+                function_type=FunctionType.BM25,
             )
+        )
         index_params = client.prepare_index_params()
         index_params.add_index(
             field_name=FIELD_VECTOR,
             index_type="AUTOINDEX",
             metric_type="COSINE",
         )
-        if enable_native_lexical:
-            index_params.add_index(
-                field_name=FIELD_SPARSE,
-                index_type="SPARSE_INVERTED_INDEX",
-                metric_type="BM25",
-                params={"inverted_index_algo": "DAAT_MAXSCORE"},
-            )
+        index_params.add_index(
+            field_name=FIELD_SPARSE,
+            index_type="SPARSE_INVERTED_INDEX",
+            metric_type="BM25",
+            params={"inverted_index_algo": "DAAT_MAXSCORE"},
+        )
         client.create_collection(
             collection_name=collection_name,
             schema=schema,
             index_params=index_params,
+            consistency_level=consistency_level,
         )
 
     def _load_remote_collection(self, client, collection_name: str) -> None:

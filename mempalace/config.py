@@ -197,12 +197,24 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
 DEFAULT_BACKEND = "chroma"
+DEFAULT_MILVUS_CONSISTENCY_LEVEL = "Strong"
+_MILVUS_CONSISTENCY_LEVELS = {
+    "strong": "Strong",
+    "session": "Session",
+    "bounded": "Bounded",
+    "eventually": "Eventually",
+}
 
 # How many timestamped palace backups to retain before the oldest are
 # pruned. Applies to the accumulating backups written by ``mempalace
 # migrate`` and ``mempalace repair max-seq-id`` — see
 # ``MempalaceConfig.max_backups``.
 DEFAULT_MAX_BACKUPS = 10
+
+
+def _normalize_milvus_consistency_config(value) -> str:
+    raw = str(value).strip() if value else DEFAULT_MILVUS_CONSISTENCY_LEVEL
+    return _MILVUS_CONSISTENCY_LEVELS.get(raw.lower(), raw)
 
 
 def sqlite_read_uri(db_path: str) -> str:
@@ -445,6 +457,15 @@ class MempalaceConfig:
         return str(value) if value else None
 
     @property
+    def milvus_db_name(self):
+        """Optional Milvus database name for the opt-in ``milvus`` backend."""
+        env_val = os.environ.get("MEMPALACE_MILVUS_DB_NAME")
+        if env_val:
+            return env_val.strip()
+        value = self._file_config.get("milvus_db_name")
+        return str(value).strip() if value else None
+
+    @property
     def milvus_namespace(self):
         """Optional Milvus collection namespace/prefix."""
         env_val = os.environ.get("MEMPALACE_MILVUS_NAMESPACE")
@@ -452,6 +473,15 @@ class MempalaceConfig:
             return env_val.strip()
         value = self._file_config.get("milvus_namespace")
         return str(value).strip() if value else None
+
+    @property
+    def milvus_consistency_level(self):
+        """Milvus read consistency level for the opt-in ``milvus`` backend."""
+        env_val = os.environ.get("MEMPALACE_MILVUS_CONSISTENCY_LEVEL")
+        if env_val:
+            return _normalize_milvus_consistency_config(env_val)
+        value = self._file_config.get("milvus_consistency_level")
+        return _normalize_milvus_consistency_config(value)
 
     @property
     def pgvector_dsn(self):

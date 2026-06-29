@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import uuid
@@ -7,6 +8,7 @@ import pytest
 from _backend_conformance import assert_partition_isolation
 
 from mempalace.backends import (
+    BackendError,
     BackendMismatchError,
     DimensionMismatchError,
     PalaceRef,
@@ -133,6 +135,46 @@ def test_milvus_lite_upsert_update_delete_get_order_and_multi_collection(tmp_pat
         drawers.delete(where={"wing": "b"})
         assert drawers.get().ids == ["one"]
         assert closets.get().ids == ["one"]
+    finally:
+        backend.close()
+
+
+def test_milvus_lite_db_name_and_consistency_options(tmp_path):
+    _require_milvus_lite()
+    backend = MilvusBackend()
+    palace = PalaceRef(id=str(tmp_path / "palace"), local_path=str(tmp_path / "palace"))
+    col = backend.get_collection(
+        palace=palace,
+        collection_name="drawers",
+        create=True,
+        options={"db_name": "mempalace_test", "consistency_level": "eventually"},
+    )
+    try:
+        assert col._config.db_name == "mempalace_test"
+        assert col._config.consistency_level == "Eventually"
+
+        col.upsert(ids=["a"], documents=["native bm25 document"], embeddings=[[1, 0]])
+
+        with open(os.path.join(palace.local_path, "milvus_backend.json"), encoding="utf-8") as f:
+            marker = json.load(f)
+        assert marker["milvus"]["db_name"] == "mempalace_test"
+        assert col.lexical_search(query="native", n_results=1).hits[0].id == "a"
+    finally:
+        backend.close()
+
+
+def test_milvus_rejects_invalid_consistency_level(tmp_path):
+    _require_milvus_lite()
+    backend = MilvusBackend()
+    palace = PalaceRef(id=str(tmp_path / "palace"), local_path=str(tmp_path / "palace"))
+    try:
+        with pytest.raises(BackendError, match="consistency_level"):
+            backend.get_collection(
+                palace=palace,
+                collection_name="drawers",
+                create=True,
+                options={"consistency_level": "linearizable"},
+            )
     finally:
         backend.close()
 
