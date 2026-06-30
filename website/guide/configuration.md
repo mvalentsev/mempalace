@@ -28,10 +28,10 @@ pluggable backend contract, exercised across deliberately different substrates
 store) so the contract is never accidentally shaped around one vendor. Every
 non-default backend is opt-in.
 
-| Backend | Mode | Install | Namespace isolation | Lexical search | Select with |
-| ------- | ---- | ------- | :-----------------: | :------------: | ----------- |
-| `chroma` _(default)_ | Local (embedded) | bundled | – | ✓ | default |
-| `sqlite_exact` | Local (exact cosine) | bundled | – | ✓ | `--backend sqlite_exact` |
+| Backend | Mode | Install | Namespace isolation | Lexical search | Configure with |
+| ------- | ---- | ------- | :-----------------: | :------------: | -------------- |
+| `chroma` _(default)_ | Local (embedded) | bundled | – | ✓ | `palace_path` |
+| `sqlite_exact` | Local (exact cosine) | bundled | – | ✓ | `palace_path` |
 | `qdrant` | Server (REST) | bundled | ✓ | ✓ | `MEMPALACE_QDRANT_URL` |
 | `pgvector` | Server (Postgres) | `mempalace[pgvector]` | ✓ | ✓ | `MEMPALACE_PGVECTOR_DSN` |
 <!-- New backends add one row here and one `### <Backend>` subsection below; keep README's compatibility table in sync. -->
@@ -73,7 +73,7 @@ you control.
 | `MEMPALACE_QDRANT_URL` | `http://localhost:6333` | Qdrant REST endpoint |
 | `MEMPALACE_QDRANT_API_KEY` | _(none)_ | Sent as the `api-key` header when set |
 | `MEMPALACE_QDRANT_NAMESPACE` | _(none)_ | Collection namespace prefix (tenant isolation) |
-| `MEMPALACE_QDRANT_TIMEOUT` | backend default | REST request timeout, in seconds |
+| `MEMPALACE_QDRANT_TIMEOUT` | `10.0` | REST request timeout, in seconds |
 
 ### Postgres + pgvector
 
