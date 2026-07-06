@@ -4962,6 +4962,90 @@ def test_refresh_sqlite_integrity_status_records_quick_check_errors(monkeypatch)
     assert "malformed inverted index" in mcp_server._sqlite_integrity_errors[0]
 
 
+def test_refresh_sqlite_integrity_status_skips_oversized_db(monkeypatch, tmp_path):
+    """Oversized chroma.sqlite3 must NOT run the O(size) startup quick_check."""
+    from mempalace import mcp_server, repair
+
+    (tmp_path / "chroma.sqlite3").write_bytes(b"\0" * (2 * 1024 * 1024))  # 2 MB
+    monkeypatch.setattr(mcp_server, "_is_chroma_backend", lambda: True)
+    monkeypatch.setattr(
+        type(mcp_server._config), "palace_path", property(lambda self: str(tmp_path))
+    )
+    monkeypatch.setenv("MEMPALACE_STARTUP_INTEGRITY_MAX_MB", "1")  # limit 1 MB < 2 MB
+
+    called = {"n": 0}
+
+    def _boom(palace_path):
+        called["n"] += 1
+        raise AssertionError("quick_check must not run for oversized DB")
+
+    monkeypatch.setattr(repair, "sqlite_integrity_errors", _boom)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_checked", False)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_errors", ["stale"])
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
+
+    mcp_server._refresh_sqlite_integrity_status()
+
+    assert called["n"] == 0
+    assert mcp_server._sqlite_integrity_checked is True
+    assert mcp_server._sqlite_integrity_errors == []
+
+
+def test_refresh_sqlite_integrity_status_runs_when_under_limit(monkeypatch, tmp_path):
+    """A DB under the limit still runs the quick_check (behaviour preserved)."""
+    from mempalace import mcp_server, repair
+
+    (tmp_path / "chroma.sqlite3").write_bytes(b"\0" * (512 * 1024))  # 0.5 MB
+    monkeypatch.setattr(mcp_server, "_is_chroma_backend", lambda: True)
+    monkeypatch.setattr(
+        type(mcp_server._config), "palace_path", property(lambda self: str(tmp_path))
+    )
+    monkeypatch.setenv("MEMPALACE_STARTUP_INTEGRITY_MAX_MB", "1")  # limit 1 MB > 0.5 MB
+
+    called = {"n": 0}
+
+    def _spy(palace_path):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr(repair, "sqlite_integrity_errors", _spy)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_checked", False)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_errors", [])
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
+
+    mcp_server._refresh_sqlite_integrity_status()
+
+    assert called["n"] == 1
+    assert mcp_server._sqlite_integrity_checked is True
+
+
+def test_startup_integrity_size_gate_disabled_with_zero(monkeypatch, tmp_path):
+    """MEMPALACE_STARTUP_INTEGRITY_MAX_MB=0 disables the gate: check always runs."""
+    from mempalace import mcp_server, repair
+
+    (tmp_path / "chroma.sqlite3").write_bytes(b"\0" * (4 * 1024 * 1024))  # 4 MB
+    monkeypatch.setattr(mcp_server, "_is_chroma_backend", lambda: True)
+    monkeypatch.setattr(
+        type(mcp_server._config), "palace_path", property(lambda self: str(tmp_path))
+    )
+    monkeypatch.setenv("MEMPALACE_STARTUP_INTEGRITY_MAX_MB", "0")
+
+    called = {"n": 0}
+
+    def _spy(palace_path):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr(repair, "sqlite_integrity_errors", _spy)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_checked", False)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_errors", [])
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
+
+    mcp_server._refresh_sqlite_integrity_status()
+
+    assert called["n"] == 1
+
+
 def test_sqlite_integrity_refusal_handles_none_palace_path(monkeypatch):
     """
     Regression test for Gemini review feedback on PR #1823 (lines 433-455).

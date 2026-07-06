@@ -350,6 +350,19 @@ _SQLITE_INTEGRITY_ALLOWED_TOOLS = frozenset(
     }
 )
 
+# The startup probe above runs PRAGMA quick_check, which reads every page of
+# chroma.sqlite3 and is therefore O(database size). On multi-GB palaces it can
+# exceed the MCP client's connection/handshake timeout, so the server never
+# finishes starting and the client drops the connection (the peer-writer guard
+# and lazy consumers all funnel through _refresh_sqlite_integrity_status). Skip
+# the *startup* probe when the database exceeds this size (MB). `mempalace
+# repair` still runs the full quick_check via repair.sqlite_integrity_errors
+# before any destructive rebuild, so corruption is still caught where it
+# matters. Set MEMPALACE_STARTUP_INTEGRITY_MAX_MB=0 to disable the gate and
+# always run the startup probe.
+_STARTUP_INTEGRITY_MAX_MB_ENV = "MEMPALACE_STARTUP_INTEGRITY_MAX_MB"
+_STARTUP_INTEGRITY_MAX_MB_DEFAULT = 512.0
+
 
 # MCP peer-writer guard (#1818).
 #
@@ -467,6 +480,33 @@ def _mcp_peer_writer_refusal(req_id, tool_name: str):
     }
 
 
+def _startup_integrity_size_limit_bytes() -> int:
+    """Byte size above which the startup SQLite quick_check is skipped.
+
+    Returns 0 when the gate is disabled (``MEMPALACE_STARTUP_INTEGRITY_MAX_MB``
+    set to 0, a non-positive number, or an unparseable value), meaning the
+    startup probe always runs.
+    """
+
+    raw = os.environ.get(_STARTUP_INTEGRITY_MAX_MB_ENV, "").strip()
+    if not raw:
+        mb = _STARTUP_INTEGRITY_MAX_MB_DEFAULT
+    else:
+        try:
+            mb = float(raw)
+        except ValueError:
+            logger.warning(
+                "Invalid %s=%r; using default %.0f MB",
+                _STARTUP_INTEGRITY_MAX_MB_ENV,
+                raw,
+                _STARTUP_INTEGRITY_MAX_MB_DEFAULT,
+            )
+            mb = _STARTUP_INTEGRITY_MAX_MB_DEFAULT
+    if mb <= 0:
+        return 0
+    return int(mb * 1024 * 1024)
+
+
 def _refresh_sqlite_integrity_status() -> None:
     """Refresh the MCP startup SQLite/FTS5 integrity gate.
 
@@ -485,6 +525,29 @@ def _refresh_sqlite_integrity_status() -> None:
         _sqlite_integrity_errors = []
         _sqlite_integrity_check_error = ""
         return
+
+    max_bytes = _startup_integrity_size_limit_bytes()
+    if max_bytes > 0:
+        sqlite_path = os.path.join(_config.palace_path, "chroma.sqlite3")
+        try:
+            db_bytes = os.path.getsize(sqlite_path)
+        except OSError:
+            db_bytes = 0
+        if db_bytes > max_bytes:
+            _sqlite_integrity_checked = True
+            _sqlite_integrity_errors = []
+            _sqlite_integrity_check_error = ""
+            logger.warning(
+                "SQLite startup integrity check skipped: %s is %.0f MB "
+                "(> %.0f MB limit); PRAGMA quick_check would block MCP "
+                "startup. Run `mempalace repair` for a full check, or set "
+                "%s (MB; 0 disables the limit).",
+                sqlite_path,
+                db_bytes / (1024 * 1024),
+                max_bytes / (1024 * 1024),
+                _STARTUP_INTEGRITY_MAX_MB_ENV,
+            )
+            return
 
     try:
         from .repair import sqlite_integrity_errors
