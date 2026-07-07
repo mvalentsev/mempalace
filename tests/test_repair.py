@@ -1817,6 +1817,45 @@ def test_rebuild_from_sqlite_in_place_refuses_without_archive_flag(tmp_path):
     assert archives == []
 
 
+def test_rebuild_from_sqlite_in_place_archive_failure_leaves_palace_untouched(
+    tmp_path, monkeypatch
+):
+    """A file inside the palace held open by another process (MCP server,
+    a running mine, another harness) must abort the archive step cleanly,
+    leaving the live palace fully intact.
+
+    Regression test for a real-world incident (2026-07-05/06, Windows 11):
+    the archive step used ``shutil.move``, whose fallback for a failed
+    ``os.rename`` is copytree + rmtree. That rmtree deletes the live
+    palace file-by-file until it hits the first locked file, so an
+    in-progress mine or a live MCP server holding one file open left the
+    palace partially gutted next to a partial archive copy -- twice, on
+    two separate nights. os.rename fails atomically up front with nothing
+    touched; this test locks that behaviour in so a future change back to
+    shutil.move (or an equivalent copy+delete fallback) fails loudly.
+    """
+    palace = tmp_path / "palace"
+    rows = [("d1", "doc one", {"wing": "w"}), ("d2", "doc two", {"wing": "w"})]
+    _seed_palace(palace, "mempalace_drawers", rows)
+    sqlite_before = (palace / "chroma.sqlite3").stat().st_size
+    entries_before = sorted(p.name for p in palace.iterdir())
+
+    def _raise(*_args, **_kwargs):
+        raise PermissionError("[WinError 32] simulated: file held open by another process")
+
+    monkeypatch.setattr(repair.os, "rename", _raise)
+
+    counts = repair.rebuild_from_sqlite(str(palace), str(palace), archive_existing_dest=True)
+
+    assert counts == {}
+    # Palace directory contents and the sqlite file itself are byte-for-byte
+    # untouched -- no partial delete, no partial archive left behind.
+    assert sorted(p.name for p in palace.iterdir()) == entries_before
+    assert (palace / "chroma.sqlite3").stat().st_size == sqlite_before
+    archives = [p for p in tmp_path.iterdir() if "pre-rebuild" in p.name]
+    assert archives == []
+
+
 def test_rebuild_from_sqlite_source_missing_chroma_db(tmp_path):
     """Source dir exists but has no chroma.sqlite3 → returns empty,
     leaves dest untouched."""

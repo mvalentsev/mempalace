@@ -1405,7 +1405,30 @@ def rebuild_from_sqlite(
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         archive_path = f"{dest_palace}.pre-rebuild-{ts}"
         print(f"  Archiving {dest_palace} → {archive_path}")
-        shutil.move(dest_palace, archive_path)
+        # os.rename, NOT shutil.move. When any file inside the palace is
+        # held open by another process (MCP server, a running mine, another
+        # harness), renaming the directory fails atomically UP FRONT on
+        # Windows and the palace is left untouched. shutil.move's fallback
+        # for a failed rename is copytree + rmtree — and that rmtree
+        # deletes the live palace file-by-file until it hits the first
+        # locked file, leaving the palace partially gutted next to a
+        # partial archive copy. Observed live (Windows 11, 2026-07-05/06):
+        # two interrupted in-place repairs; the palace survived only
+        # because the locked chroma.sqlite3/*.bin themselves could not be
+        # unlinked. Same lesson as the source-validation comment above:
+        # fail cleanly before touching anything.
+        try:
+            os.rename(dest_palace, archive_path)
+        except OSError as exc:
+            print(
+                f"\n  Cannot archive the existing palace: a file inside it "
+                f"is held open by another process (MCP server, running "
+                f"mine, another harness?).\n"
+                f"  Close those processes and retry. The palace was left "
+                f"untouched.\n"
+                f"  ({exc})"
+            )
+            return {}
         source_palace = archive_path
         src_db = os.path.join(source_palace, "chroma.sqlite3")
 
