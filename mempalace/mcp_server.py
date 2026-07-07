@@ -405,9 +405,17 @@ def _acquire_mcp_writer_lock() -> tuple[bool, str]:
     """Acquire this process's per-palace MCP writer lease.
 
     Returns (True, "") when this process may write. Returns (False, reason)
-    when another live writer already owns the per-palace lease. Once a server
-    starts read-only it stays read-only for its lifetime; restarting is the
-    safe way to become the writer after the original holder exits.
+    when another live writer already owns the per-palace lease.
+
+    Self-healing: a server that came up read-only (a peer held the lease at
+    startup) RE-ATTEMPTS the non-blocking flock on every subsequent call.
+    ``_mcp_peer_writer_refusal`` invokes this on each mutating tool, so once
+    the original holder exits — the OS releases its flock on process death —
+    the next mutating call transparently promotes this server to writer, with
+    no restart. The flock is arbitrated by the kernel (LOCK_NB), so two servers
+    can never both win the retry. ``_MCP_WRITER_READ_ONLY`` is now only a
+    status flag; it no longer short-circuits the retry (that sticky latch used
+    to strand a server read-only for life even after the peer was long gone).
     """
 
     global _MCP_WRITER_LOCK_CM, _MCP_WRITER_READ_ONLY, _MCP_WRITER_LOCK_FAILED
@@ -419,9 +427,10 @@ def _acquire_mcp_writer_lock() -> tuple[bool, str]:
     if _MCP_WRITER_LOCK_CM is not None:
         return True, ""
 
-    if _MCP_WRITER_READ_ONLY:
-        return False, _MCP_WRITER_LOCK_ERROR
-
+    # NB: deliberately NO sticky read-only short-circuit here. If a peer held
+    # the lease at startup we fall through and retry mine_palace_lock below, so
+    # the server self-heals into the writer the moment the peer exits. A broken
+    # lock *mechanism* (below) is still cached, since retrying it can't help.
     if _MCP_WRITER_LOCK_FAILED:
         return True, _MCP_WRITER_LOCK_ERROR
 

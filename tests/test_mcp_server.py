@@ -4881,6 +4881,52 @@ def test_peer_writer_lock_setup_failure_is_cached(monkeypatch):
     assert reason_second == reason_first
 
 
+def test_peer_writer_readonly_self_heals_after_peer_exits(monkeypatch):
+    """A server that came up read-only must retry the flock and promote itself
+    to writer once the peer holding the lease exits — no restart required."""
+    from mempalace import mcp_server, palace
+
+    class _DummyLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    calls = {"count": 0}
+
+    def flaky_mine_palace_lock(palace_path):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            # First attempt: a live peer still holds the lease.
+            raise palace.MineAlreadyRunning(
+                f"palace {palace_path} is held by pid=999"
+            )
+        # Second attempt: peer has exited, flock is free.
+        return _DummyLock()
+
+    monkeypatch.delenv(mcp_server._MCP_ALLOW_PEER_WRITER_ENV, raising=False)
+    monkeypatch.setattr(palace, "mine_palace_lock", flaky_mine_palace_lock)
+    monkeypatch.setattr(mcp_server, "_MCP_WRITER_LOCK_CM", None)
+    monkeypatch.setattr(mcp_server, "_MCP_WRITER_READ_ONLY", False)
+    monkeypatch.setattr(mcp_server, "_MCP_WRITER_LOCK_FAILED", False)
+    monkeypatch.setattr(mcp_server, "_MCP_WRITER_LOCK_ERROR", "")
+
+    # First call: refused, latched read-only for reporting.
+    ok_first, reason_first = mcp_server._acquire_mcp_writer_lock()
+    assert ok_first is False
+    assert mcp_server._MCP_WRITER_READ_ONLY is True
+    assert "already holds" in reason_first
+
+    # Second call: the sticky latch must NOT short-circuit — retry succeeds.
+    ok_second, reason_second = mcp_server._acquire_mcp_writer_lock()
+    assert ok_second is True
+    assert reason_second == ""
+    assert calls["count"] == 2  # retried, not stranded read-only
+    assert mcp_server._MCP_WRITER_LOCK_CM is not None
+    assert mcp_server._MCP_WRITER_READ_ONLY is False
+
+
 def test_sqlite_integrity_gate_refuses_non_status_tool(monkeypatch):
     from mempalace import mcp_server
 
