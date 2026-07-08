@@ -4943,6 +4943,73 @@ def test_sqlite_integrity_status_surfaces_payload_without_chroma(monkeypatch):
     assert "malformed inverted index" in payload["sqlite_integrity"]["errors"][0]
 
 
+def test_sqlite_integrity_payload_not_applicable_on_non_chroma_backend(monkeypatch):
+    """#1931: a non-chroma backend runs no sqlite quick_check, so status must
+    report the check as not-applicable rather than implying it passed.
+
+    Before the fix the payload reported ``checked=True``/``ok=True`` and a
+    ``chroma.sqlite3`` path that does not exist for the active backend.
+    """
+    from mempalace import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_selected_backend_name", lambda: "qdrant")
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_checked", True)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_errors", [])
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
+
+    payload = mcp_server._sqlite_integrity_payload()
+
+    assert payload["checked"] is False
+    assert payload["ok"] is None
+    assert "qdrant" in payload["reason"]
+    # No chroma.sqlite3 reference and a shape stable with the chroma payload.
+    assert payload["sqlite_path"] == ""
+    assert payload["error_count"] == 0
+    assert payload["errors"] == []
+
+
+def test_sqlite_integrity_payload_reports_unknown_when_backend_unresolvable(monkeypatch):
+    """#1931: if backend resolution raises, status still must not claim an
+    integrity pass; it reports not-applicable for an unknown backend.
+    """
+    from mempalace import mcp_server
+
+    def _boom():
+        raise RuntimeError("backend registry unavailable")
+
+    monkeypatch.setattr(mcp_server, "_selected_backend_name", _boom)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_checked", True)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_errors", [])
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
+
+    payload = mcp_server._sqlite_integrity_payload()
+
+    assert payload["checked"] is False
+    assert payload["ok"] is None
+    assert "unknown" in payload["reason"]
+
+
+def test_sqlite_integrity_payload_full_shape_on_chroma_backend(monkeypatch):
+    """#1931 guard: a chroma backend with no recorded errors must still return
+    the full integrity payload; the not-applicable branch must not swallow the
+    chroma path.
+    """
+    from mempalace import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_selected_backend_name", lambda: "chroma")
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_checked", True)
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_errors", [])
+    monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
+
+    payload = mcp_server._sqlite_integrity_payload()
+
+    assert payload["checked"] is True
+    assert payload["ok"] is True
+    assert "sqlite_path" in payload
+    assert payload["error_count"] == 0
+    assert "reason" not in payload
+
+
 def test_sqlite_integrity_reconnect_allowed_when_corrupt(monkeypatch):
     from mempalace import mcp_server
 

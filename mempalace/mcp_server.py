@@ -581,6 +581,34 @@ def _ensure_sqlite_integrity_status() -> None:
 def _sqlite_integrity_payload() -> dict:
     _ensure_sqlite_integrity_status()
 
+    # The integrity gate only knows how to check chroma.sqlite3, and
+    # _refresh_sqlite_integrity_status short-circuits for non-chroma backends,
+    # so on a non-chroma backend no quick_check runs. Reporting checked/ok true
+    # would imply a verification that never happened and reference a
+    # chroma.sqlite3 the active backend does not use (#1931). Recorded errors
+    # only ever come from the chroma path, so surface them regardless of the
+    # backend lookup (which may itself fail); only the clean case is
+    # reclassified as not-applicable.
+    if not _sqlite_integrity_errors:
+        try:
+            backend_name = _selected_backend_name()
+        except Exception:
+            logger.debug("backend resolution failed for integrity payload", exc_info=True)
+            backend_name = ""
+        if backend_name != "chroma":
+            return {
+                "checked": False,
+                "ok": None,
+                "palace": _config.palace_path or "",
+                "sqlite_path": "",
+                "error_count": 0,
+                "errors": [],
+                "reason": (
+                    "chroma.sqlite3 integrity check does not run for backend "
+                    f"{backend_name or 'unknown'!r}"
+                ),
+            }
+
     payload = {
         "checked": _sqlite_integrity_checked,
         "ok": not _sqlite_integrity_errors,
