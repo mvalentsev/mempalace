@@ -5634,3 +5634,71 @@ def test_ensure_sqlite_integrity_status_joins_inflight_probe(monkeypatch):
         release_probe.set()
         background.join(5)
         consumer_thread.join(5)
+
+
+class TestSearchDateFilters:
+    """tool_search since/before window (#463) — MCP surface.
+
+    Window semantics and helpers are shared with list_drawers (#1128) via
+    mempalace.date_window; seeded filed_at values are 2026-01-01..01-04.
+    """
+
+    BROAD = "authentication database frontend sprint planning"
+
+    def test_search_since_inclusive(self, monkeypatch, config, palace_path, seeded_collection, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_search
+
+        result = tool_search(self.BROAD, limit=10, since="2026-01-03")
+        assert "error" not in result
+        got = sorted(r["created_at"][:10] for r in result["results"])
+        assert got == ["2026-01-03", "2026-01-04"]
+
+    def test_search_window_composes_with_wing(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_search
+
+        result = tool_search(self.BROAD, limit=10, wing="project", before="2026-01-03")
+        got = {(r["wing"], r["created_at"][:10]) for r in result["results"]}
+        assert got == {("project", "2026-01-01"), ("project", "2026-01-02")}
+
+    def test_search_invalid_since_is_clean_error(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_search
+
+        result = tool_search("anything", since="next tuesday")
+        assert set(result) == {"error"}
+        assert "since" in result["error"]
+
+    def test_search_inverted_window_is_clean_error(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_search
+
+        result = tool_search("anything", since="2026-01-04", before="2026-01-01")
+        assert set(result) == {"error"}
+        assert "must be earlier than" in result["error"]
+
+    def test_search_filters_envelope_includes_window(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_search
+
+        result = tool_search(self.BROAD, since="2026-01-02", before="2026-01-04")
+        assert result["filters"]["since"] == "2026-01-02"
+        assert result["filters"]["before"] == "2026-01-04"
+
+    def test_search_schema_declares_window_properties(self):
+        from mempalace.mcp_server import TOOLS
+
+        schema = TOOLS["mempalace_search"]["input_schema"]
+        assert "since" in schema["properties"]
+        assert "before" in schema["properties"]
+        assert schema["properties"]["since"]["type"] == "string"
+        assert schema["properties"]["before"]["type"] == "string"

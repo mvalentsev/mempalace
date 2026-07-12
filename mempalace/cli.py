@@ -935,6 +935,8 @@ def cmd_search(args):
             wing=args.wing,
             room=args.room,
             n_results=args.results,
+            since=args.since,
+            before=args.before,
         )
     except SearchError:
         sys.exit(1)
@@ -1939,6 +1941,20 @@ def main():
     p_search.add_argument("--wing", default=None, help="Limit to one project")
     p_search.add_argument("--room", default=None, help="Limit to one room")
     p_search.add_argument("--results", type=int, default=5, help="Number of results")
+    p_search.add_argument(
+        "--since",
+        default=None,
+        help=(
+            "Only drawers filed on/after this ISO date/datetime (inclusive), "
+            "e.g. 2026-04-01. Drawers without a filed_at are excluded while "
+            "a date bound is set"
+        ),
+    )
+    p_search.add_argument(
+        "--before",
+        default=None,
+        help="Only drawers filed strictly before this ISO date/datetime (exclusive)",
+    )
 
     # compress
     p_compress = sub.add_parser(

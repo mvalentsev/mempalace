@@ -77,6 +77,7 @@ from .backends.chroma import (  # noqa: E402
     reset_hnsw_capacity_cache,
 )
 from .backends import BackendMismatchError, PalaceRef, detect_backend_for_path  # noqa: E402
+from .date_window import filed_at_in_window, parse_date_bound  # noqa: E402
 from .query_sanitizer import sanitize_query  # noqa: E402
 from .searcher import (  # noqa: E402
     _distance_to_similarity,
@@ -1431,75 +1432,12 @@ def _sanitize_optional_source_file(value: str = None) -> str:
     return value
 
 
-def _parse_date_filter(value: Optional[str] = None, field_name: str = "date") -> Optional[datetime]:
-    """Parse an optional ISO-8601 date/datetime filter bound (#1128).
-
-    Accepts a date (``"2026-04-01"``), a naive timestamp
-    (``"2026-04-01T09:30:00"``), or one carrying a ``Z``/``+HH:MM`` offset.
-    Returns a naive ``datetime`` for wall-clock
-    comparison against drawer ``filed_at`` values, which are stored as naive
-    local ISO strings (``datetime.now().isoformat()``). Any timezone offset on
-    the input is dropped so an aware bound never raises a ``TypeError`` against
-    a naive ``filed_at``. Comparison is therefore wall-clock, which is what the
-    local-first single-machine model wants; an offset bound is matched on its
-    wall-clock fields, not its absolute instant, so a bound whose offset differs
-    from the zone ``filed_at`` was recorded in is matched by clock time.
-    The accepted grammar is a date, an ISO timestamp (optionally fractional),
-    and an optional ``Z``/``±HH:MM`` offset; other ISO 8601 forms (basic format,
-    week dates) are outside the contract and are rejected on the Python 3.9 floor
-    even where a newer ``fromisoformat`` would accept them.
-    Blank / whitespace-only means "no filter" (``None``).
-    Raises ``ValueError`` on an unparseable value so the caller can surface a
-    clear error, mirroring the wing/room sanitizers.
-    """
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError(f"{field_name} must be an ISO date string")
-    value = value.strip()
-    if not value:
-        return None
-    # datetime.fromisoformat before Python 3.11 rejects a trailing "Z" (Zulu),
-    # and appending "+00:00" would break a date-only value on 3.9/3.10
-    # ("2026-04-01+00:00" is rejected there). Any offset is dropped below for
-    # wall-clock comparison anyway, so just strip a trailing Z/z; both date and
-    # date-time Zulu inputs then parse on the 3.9 floor.
-    iso = value[:-1] if value.endswith(("Z", "z")) else value
-    try:
-        parsed = datetime.fromisoformat(iso)
-    except ValueError as exc:
-        raise ValueError(
-            f"{field_name} must be an ISO date string "
-            f"(e.g. '2026-04-01' or '2026-04-01T09:30:00'), got {value!r}"
-        ) from exc
-    if parsed.tzinfo is not None:
-        parsed = parsed.replace(tzinfo=None)
-    return parsed
-
-
-def _filed_at_in_window(
-    filed_at, since_dt: Optional[datetime], before_dt: Optional[datetime]
-) -> bool:
-    """True if a drawer's ``filed_at`` falls in ``[since, before)`` (#1128).
-
-    ``since`` is inclusive and ``before`` is exclusive, matching the issue spec.
-    Parsing (``Z``/offset normalization, tz drop) is delegated to
-    ``_parse_date_filter`` so a bound and a ``filed_at`` are compared
-    identically. A drawer whose ``filed_at`` is missing or unparseable cannot
-    be confirmed in-window, so it is EXCLUDED whenever a bound is active — a
-    date-filtered listing must never silently include rows of unknown age.
-    """
-    try:
-        filed_dt = _parse_date_filter(filed_at, "filed_at")
-    except ValueError:
-        return False
-    if filed_dt is None:
-        return False
-    if since_dt is not None and filed_dt < since_dt:
-        return False
-    if before_dt is not None and filed_dt >= before_dt:
-        return False
-    return True
+# The #1128 date-filter helpers moved to ``mempalace.date_window`` so the
+# search-side window (#463) can share them without importing this module
+# (whose import installs MCP stdio protection). Aliased under their
+# historical private names — every call site and test keeps working.
+_parse_date_filter = parse_date_bound
+_filed_at_in_window = filed_at_in_window
 
 
 # ==================== READ TOOLS ====================
@@ -2038,6 +1976,8 @@ def tool_search(
     wing: str = None,
     room: str = None,
     source_file: str = None,
+    since: str = None,
+    before: str = None,
     max_distance: float = 1.5,
     min_similarity: float = None,
     context: str = None,
@@ -2049,6 +1989,8 @@ def tool_search(
         source_file = _sanitize_optional_source_file(source_file)
     except ValueError as e:
         return {"error": str(e)}
+    # since/before are validated inside search_memories (shared
+    # parse_window), which returns the same {"error": ...} shape.
     # Backwards compat: accept old name
     # Backwards compat: convert old similarity scale (higher=stricter) to
     # distance scale (lower=stricter). Similarity 0.8 → distance 0.2.
@@ -2066,6 +2008,8 @@ def tool_search(
         wing=wing,
         room=room,
         source_file=source_file,
+        since=since,
+        before=before,
         n_results=limit,
         max_distance=dist,
         vector_disabled=_vector_disabled,
@@ -2084,6 +2028,8 @@ def tool_search(
             wing=wing,
             room=room,
             source_file=source_file,
+            since=since,
+            before=before,
             n_results=limit,
             max_distance=dist,
             vector_disabled=_vector_disabled,
@@ -4287,6 +4233,22 @@ TOOLS = {
                         "stored path exactly (leading/trailing whitespace trimmed); no "
                         "glob or basename matching. Pass the value from a result's "
                         "'source_path' field; the displayed 'source_file' is only a basename."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "description": (
+                        "Only drawers filed on/after this ISO date or datetime "
+                        "(inclusive), e.g. '2026-04-01' or '2026-04-01T09:30:00'. "
+                        "Compares the drawer's created_at (filed_at) wall-clock; "
+                        "drawers without a filed_at are excluded while set."
+                    ),
+                },
+                "before": {
+                    "type": "string",
+                    "description": (
+                        "Only drawers filed strictly before this ISO date or "
+                        "datetime (exclusive). Same comparison rules as 'since'."
                     ),
                 },
                 "max_distance": {

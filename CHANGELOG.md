@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Features
+
+- **`mempalace_search` / `mempalace search` — `since`/`before` date window.** Semantic search is poor at temporal queries ("what did we discuss this week?" scores ~0.35 even when matching drawers exist), so the search surfaces now accept the same `[since, before)` window `list_drawers` gained in #1128: inclusive/exclusive ISO bounds compared wall-clock against each drawer's `filed_at`, undated drawers excluded while a bound is active. The window applies on every candidate path (vector, `candidate_strategy="union"`, and the BM25-only fallback); the vector candidate pool widens under an active window (ChromaDB cannot range-compare string metadata server-side), and a full pool is flagged via `date_filter_pool_truncated` instead of passing silently. Shared parsing lives in the new `mempalace.date_window` module, also backing the `list_drawers` filter. (#463)
+
 ---
 
 ## [3.6.0] — 2026-07-14
