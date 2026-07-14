@@ -1165,8 +1165,14 @@ def mine_palace_lock(palace_path: str):
                 ) from exc
         # Record our own identity for any later contender's diagnostic message.
         _write_lock_holder(lf)
-        _mark_held(palace_key)
+        # Mark the hold from inside the try so it always pairs with
+        # _mark_released. If it sat before the try, an async exception
+        # (a SIGINT/KeyboardInterrupt) landing in the gap would orphan
+        # palace_key in the holder set while the outer finally frees the
+        # flock, so the in-memory hold would outlive the OS lock and a later
+        # re-entrant acquire would pass through and write without the flock.
         try:
+            _mark_held(palace_key)
             yield
         finally:
             _mark_released(palace_key)
