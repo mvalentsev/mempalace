@@ -383,9 +383,7 @@ class TestScanConvos:
         # The tool-results skip must not turn into a blanket nested-dir skip.
         nested = tmp_path / "archive"
         nested.mkdir()
-        (nested / "old-chat.md").write_text(
-            "> q\na\n> q2\na2\n> q3\na3", encoding="utf-8"
-        )
+        (nested / "old-chat.md").write_text("> q\na\n> q2\na2\n> q3\na3", encoding="utf-8")
         files = scan_convos(str(tmp_path))
         assert [f.name for f in files] == ["old-chat.md"]
 
