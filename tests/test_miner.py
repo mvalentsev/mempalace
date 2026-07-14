@@ -95,8 +95,8 @@ def test_mine_computes_hallways_for_wing_post_mine(monkeypatch):
 
     hallway_calls = []
 
-    def fake_compute(wing, col=None, min_count=2):
-        hallway_calls.append({"wing": wing, "col": col, "min_count": min_count})
+    def fake_compute(wing, col=None, min_count=2, config=None):
+        hallway_calls.append({"wing": wing, "col": col, "min_count": min_count, "config": config})
         return []  # no hallways materialized — that's not what we're testing
 
     # Patch at the call site (mempalace.miner.compute_hallways_for_wing) so
@@ -134,6 +134,7 @@ def test_mine_computes_hallways_for_wing_post_mine(monkeypatch):
         assert call["col"] is not None, (
             "must pass the live collection so hallways can query drawers"
         )
+        assert call["config"].palace_path == str(palace_path)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -147,7 +148,7 @@ def test_mine_hallway_failure_does_not_crash_mine(monkeypatch):
     """
     from mempalace import miner as miner_mod
 
-    def angry_compute(wing, col=None, min_count=2):
+    def angry_compute(wing, col=None, min_count=2, config=None):
         raise RuntimeError("simulated hallway-compute explosion")
 
     monkeypatch.setattr(miner_mod, "compute_hallways_for_wing", angry_compute)
@@ -194,8 +195,8 @@ def test_mine_computes_entity_tunnels_for_wing_post_mine(monkeypatch):
 
     entity_tunnel_calls = []
 
-    def fake_compute(wing):
-        entity_tunnel_calls.append({"wing": wing})
+    def fake_compute(wing, config=None):
+        entity_tunnel_calls.append({"wing": wing, "config": config})
         return 0  # no tunnels — that's not what we're testing here
 
     # Patch at the call site (mempalace.miner._compute_entity_tunnels_for_wing)
@@ -227,6 +228,7 @@ def test_mine_computes_entity_tunnels_for_wing_post_mine(monkeypatch):
             f"got {len(entity_tunnel_calls)}"
         )
         assert entity_tunnel_calls[0]["wing"] == "test_project"
+        assert entity_tunnel_calls[0]["config"].palace_path == str(palace_path)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -241,7 +243,7 @@ def test_mine_entity_tunnel_failure_does_not_crash_mine(monkeypatch):
     """
     from mempalace import miner as miner_mod
 
-    def angry_compute(wing):
+    def angry_compute(wing, config=None):
         raise RuntimeError("simulated entity-tunnel-compute explosion")
 
     monkeypatch.setattr(miner_mod, "_compute_entity_tunnels_for_wing", angry_compute)

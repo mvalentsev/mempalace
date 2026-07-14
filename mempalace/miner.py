@@ -1873,12 +1873,15 @@ def _mine_impl(
                     break
 
         if not dry_run:
+            from .config import MempalaceConfig
+
+            graph_config = MempalaceConfig(palace_path=palace_path)
             # Cross-wing topic tunnels: after every file in this wing has been
             # processed, link this wing to any other wing that shares a
             # confirmed TOPIC label. Out of scope for v1: manifest-dependency
             # overlap, per-topic allow/deny lists, search-result surfacing.
             try:
-                tunnels_added = _compute_topic_tunnels_for_wing(wing)
+                tunnels_added = _compute_topic_tunnels_for_wing(wing, config=graph_config)
                 if tunnels_added:
                     print(f"\n  Topic tunnels: +{tunnels_added} cross-wing link(s)")
             except Exception as e:
@@ -1894,7 +1897,9 @@ def _mine_impl(
             # must never fail a mine; it's a derived analytic, not load-bearing
             # for the drawer write that already committed above.
             try:
-                hallways_created = compute_hallways_for_wing(wing, col=collection)
+                hallways_created = compute_hallways_for_wing(
+                    wing, col=collection, config=graph_config
+                )
                 if hallways_created:
                     print(f"\n  Hallways: +{len(hallways_created)} within-wing entity link(s)")
             except Exception as e:
@@ -1910,7 +1915,7 @@ def _mine_impl(
             # ``kind="entity"`` / ``kind="topic"``. Same fault-tolerance
             # pattern: never fail a mine over a derived analytic.
             try:
-                entity_tunnels_added = _compute_entity_tunnels_for_wing(wing)
+                entity_tunnels_added = _compute_entity_tunnels_for_wing(wing, config=graph_config)
                 if entity_tunnels_added:
                     print(f"\n  Entity tunnels: +{entity_tunnels_added} cross-wing entity link(s)")
             except Exception as e:
@@ -2034,7 +2039,7 @@ def _cleanup_mine_pid_file() -> None:
         pass
 
 
-def _compute_topic_tunnels_for_wing(wing: str) -> int:
+def _compute_topic_tunnels_for_wing(wing: str, config=None) -> int:
     """Drop tunnels between ``wing`` and every other wing that shares
     confirmed topics, honoring the ``topic_tunnel_min_count`` config knob.
 
@@ -2047,13 +2052,13 @@ def _compute_topic_tunnels_for_wing(wing: str) -> int:
     topics_map = get_topics_by_wing()
     if not topics_map or wing not in topics_map:
         return 0
-    cfg = MempalaceConfig()
+    cfg = config or MempalaceConfig()
     min_count = cfg.topic_tunnel_min_count
-    created = topic_tunnels_for_wing(wing, topics_map, min_count=min_count)
+    created = topic_tunnels_for_wing(wing, topics_map, min_count=min_count, config=cfg)
     return len(created)
 
 
-def _compute_entity_tunnels_for_wing(wing: str) -> int:
+def _compute_entity_tunnels_for_wing(wing: str, config=None) -> int:
     """Drop tunnels between ``wing`` and every other wing that shares an
     entity via the within-wing hallway primitive.
 
@@ -2071,10 +2076,10 @@ def _compute_entity_tunnels_for_wing(wing: str) -> int:
     from .hallways import list_hallways
     from .palace_graph import entity_tunnels_for_wing
 
-    hallways = list_hallways()
+    hallways = list_hallways(config=config)
     if not hallways:
         return 0
-    created = entity_tunnels_for_wing(wing, hallways)
+    created = entity_tunnels_for_wing(wing, hallways, config=config)
     return len(created)
 
 

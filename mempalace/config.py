@@ -342,18 +342,26 @@ class MempalaceConfig:
     Load order: env vars > config file > defaults.
     """
 
-    def __init__(self, config_dir=None):
+    def __init__(self, config_dir=None, palace_path=None):
         """Initialize config.
 
         Args:
             config_dir: Override config directory (useful for testing).
                         Defaults to ~/.mempalace.
+            palace_path: Explicit palace data directory. This is primarily
+                         used by CLI operations that received ``--palace``;
+                         it takes precedence over environment and file config.
         """
         self._config_dir = (
             Path(config_dir) if config_dir else Path(os.path.expanduser("~/.mempalace"))
         )
         self._config_file = self._config_dir / "config.json"
         self._people_map_file = self._config_dir / "people_map.json"
+        self._palace_path_override = (
+            os.path.abspath(os.path.expanduser(str(palace_path)))
+            if palace_path is not None
+            else None
+        )
         self._file_config = {}
 
         if self._config_file.exists():
@@ -366,6 +374,8 @@ class MempalaceConfig:
     @property
     def palace_path(self):
         """Path to the memory palace data directory."""
+        if self._palace_path_override is not None:
+            return self._palace_path_override
         env_val = os.environ.get("MEMPALACE_PALACE_PATH") or os.environ.get("MEMPAL_PALACE_PATH")
         if env_val:
             # Normalize: expand ~ and collapse .. to match the CLI --palace

@@ -705,7 +705,7 @@ def mine_convos(
         )
 
 
-def _compute_hallways_for_wing_safe(wing, collection, drawers_filed):
+def _compute_hallways_for_wing_safe(wing, collection, drawers_filed, config=None):
     """Auto-populate the associative graph from the entities just mined.
 
     Best-effort: hallway computation must never fail an otherwise-good mine, and is
@@ -716,7 +716,7 @@ def _compute_hallways_for_wing_safe(wing, collection, drawers_filed):
     try:
         from .hallways import compute_hallways_for_wing
 
-        compute_hallways_for_wing(wing, col=collection)
+        compute_hallways_for_wing(wing, col=collection, config=config)
     except Exception as exc:
         print(f"  (hallways skipped: {exc})")
 
@@ -732,7 +732,7 @@ def _mine_convos_impl(
 ):
     from .config import MempalaceConfig
 
-    palace_config = MempalaceConfig()
+    palace_config = MempalaceConfig(palace_path=palace_path)
     cfg_chunk_size = palace_config.chunk_size
     # Only override convo_miner's MIN_CHUNK_SIZE when the user has set
     # min_chunk_size explicitly. min_chunk_size_explicit returns the
@@ -889,7 +889,7 @@ def _mine_convos_impl(
         # Compute hallways before the FTS5 validation: the latter opens a direct sqlite
         # connection to the Chroma DB, which can invalidate the live collection handle on
         # some Chroma builds and make the hallway fetch fail.
-        _compute_hallways_for_wing_safe(wing, collection, total_drawers)
+        _compute_hallways_for_wing_safe(wing, collection, total_drawers, config=palace_config)
         _validate_palace_fts5_after_mine(palace_path)
 
     print(f"\n{'=' * 55}")

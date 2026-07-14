@@ -1005,7 +1005,15 @@ def cmd_hallways(args):
     """List within-wing entity hallways (the auto-built associative graph)."""
     from .hallways import list_hallways
 
-    rows = list_hallways(getattr(args, "wing", None))
+    palace_path = (
+        os.path.expanduser(args.palace)
+        if getattr(args, "palace", None)
+        else MempalaceConfig().palace_path
+    )
+    rows = list_hallways(
+        getattr(args, "wing", None),
+        config=MempalaceConfig(palace_path=palace_path),
+    )
     if not rows:
         print("No hallways yet — they are built from drawer entities when you mine.")
         return

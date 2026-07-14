@@ -888,3 +888,18 @@ def test_max_backups_bad_env_falls_back_to_config(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMPALACE_MAX_BACKUPS", "garbage")
     cfg = MempalaceConfig(config_dir=str(tmp_path))
     assert cfg.max_backups == 4
+
+
+def test_explicit_palace_path_overrides_env_and_file_config(monkeypatch, tmp_path):
+    configured = tmp_path / "configured" / "palace"
+    explicit = tmp_path / "explicit" / "../explicit" / "palace"
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"palace_path": str(configured)}, f)
+    monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(tmp_path / "environment" / "palace"))
+
+    cfg = MempalaceConfig(config_dir=str(tmp_path), palace_path=str(explicit))
+
+    expected = os.path.abspath(os.path.expanduser(str(explicit)))
+    assert cfg.palace_path == expected
+    assert cfg.hallway_file == os.path.join(os.path.dirname(expected), "hallways.json")
+    assert cfg.tunnel_file == os.path.join(os.path.dirname(expected), "tunnels.json")
