@@ -1358,6 +1358,57 @@ def test_sqlite_integrity_errors_returns_empty_for_healthy_db(tmp_path):
     assert repair.sqlite_integrity_errors(str(palace)) == []
 
 
+def test_sqlite_integrity_errors_uses_bounded_contention_timeout(tmp_path, monkeypatch):
+    """Integrity checks wait out routine writers without a real-time sleep.
+
+    Assert the sqlite connection contract directly so this regression test is
+    deterministic and does not add the seven-second delay from the original
+    proposal to every test run.
+    """
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    db_path = palace / "chroma.sqlite3"
+    db_path.touch()
+
+    calls = []
+
+    class _Result:
+        @staticmethod
+        def fetchall():
+            return [("ok",)]
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement):
+            calls.append(("execute", statement))
+            return _Result()
+
+    def _connect(database, **kwargs):
+        calls.append(("connect", database, kwargs))
+        return _Connection()
+
+    monkeypatch.setattr(repair.sqlite3, "connect", _connect)
+
+    assert repair.sqlite_integrity_errors(str(palace)) == []
+    assert calls == [
+        (
+            "connect",
+            repair.sqlite_read_uri(str(db_path)),
+            {
+                "uri": True,
+                "timeout": repair._SQLITE_INTEGRITY_BUSY_TIMEOUT_SECONDS,
+            },
+        ),
+        ("execute", "PRAGMA quick_check"),
+    ]
+    assert repair._SQLITE_INTEGRITY_BUSY_TIMEOUT_SECONDS == 15.0
+
+
 def test_sqlite_integrity_errors_reports_unreadable_sqlite_file(tmp_path):
     palace = tmp_path / "palace"
     palace.mkdir()

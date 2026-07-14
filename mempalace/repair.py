@@ -573,6 +573,9 @@ def sqlite_drawer_count(palace_path: str, collection_name: Optional[str] = None)
         return None
 
 
+_SQLITE_INTEGRITY_BUSY_TIMEOUT_SECONDS = 15.0
+
+
 def sqlite_integrity_errors(palace_path: str) -> list[str]:
     """Return SQLite quick_check errors for chroma.sqlite3.
 
@@ -591,7 +594,16 @@ def sqlite_integrity_errors(palace_path: str) -> list[str]:
         return []
 
     try:
-        with sqlite3.connect(sqlite_read_uri(sqlite_path), uri=True) as conn:
+        # A writer holding SQLite's lock is contention, not corruption. The
+        # sqlite3 module defaults to five seconds, which is shorter than
+        # routine batch mines and curator writes on rollback-journal palaces.
+        # Give those writers a bounded grace period before surfacing BUSY to
+        # callers; genuine corruption still comes from PRAGMA quick_check.
+        with sqlite3.connect(
+            sqlite_read_uri(sqlite_path),
+            uri=True,
+            timeout=_SQLITE_INTEGRITY_BUSY_TIMEOUT_SECONDS,
+        ) as conn:
             rows = conn.execute("PRAGMA quick_check").fetchall()
     except sqlite3.Error as e:
         return [f"PRAGMA quick_check failed: {e}"]
