@@ -810,6 +810,12 @@ def _submit_daemon_cli_job(kind: str, payload: dict, args, *, background: bool) 
             backend=backend,
             wait=not background,
             auto_start=True,
+            # A job refused the palace lock is deferred, not failed (#2014), so
+            # it never becomes terminal while the holder lives. Waiting it out
+            # would strand this terminal behind a peer that can outlive the
+            # default hour; report the parked job instead. A job that is really
+            # running (a long mine) is still waited out.
+            stop_on_lock_deferral=not background,
         )
     except DaemonError as exc:
         print(f"mempalace: daemon submission failed: {exc}", file=sys.stderr)
@@ -818,6 +824,26 @@ def _submit_daemon_cli_job(kind: str, payload: dict, args, *, background: bool) 
     if background:
         print(f"Submitted daemon job {job['id']} ({kind})")
         return
+
+    from .daemon import job_deferred_by_lock
+
+    if job_deferred_by_lock(job):
+        reason = (job.get("error") or {}).get("message") or "the palace write lock is held"
+        # --palace is global, so it has to be echoed back ahead of the
+        # subcommand: without it the suggestion silently lists the DEFAULT
+        # palace's queue (or nothing at all) instead of the one this job is
+        # parked in -- a wrong answer that looks authoritative.
+        # `daemon jobs` and not `daemon wait`: we just declined to wait out the
+        # holder, so pointing the operator at a command that blocks on the very
+        # state we could not wait for would undo the point of this branch.
+        palace_flag = f"--palace {shlex.quote(args.palace)} " if args.palace else ""
+        print(f"mempalace: {reason}", file=sys.stderr)
+        print(
+            f"mempalace: job {job['id']} is queued and runs when the holder exits "
+            f"(check it with: mempalace {palace_flag}daemon jobs)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     result = job.get("result") or {}
     from .service import print_job_result

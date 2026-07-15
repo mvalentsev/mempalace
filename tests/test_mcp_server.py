@@ -4259,6 +4259,32 @@ class TestStructuredErrors:
         assert "another mine is in progress" in result["error"]
         assert result.get("error_class") == "LockHeldByOtherProcess"
 
+    def test_tool_diary_write_lease_refusal_returns_error_class(self, monkeypatch):
+        """tool_diary_write must mark a peer-held palace lease with error_class,
+        like tool_mine/tool_sync already do. The daemon keys its defer-vs-fail
+        decision on that marker (#2014); swallowed by the bare `except Exception`
+        the refusal was indistinguishable from a genuine write error, so a queued
+        diary entry was dead-lettered instead of retried."""
+        from mempalace import daemon, mcp_server
+        from mempalace.palace import MineAlreadyRunning
+
+        class _LeaseHeldCollection:
+            def add(self, **kwargs):
+                raise MineAlreadyRunning("palace /p is held by PID 999 (mempalace-mcp)")
+
+        monkeypatch.setattr(
+            mcp_server, "_get_collection", lambda create=False: _LeaseHeldCollection()
+        )
+        monkeypatch.setattr(mcp_server, "_wal_log", lambda *a, **kw: None)
+
+        result = mcp_server.tool_diary_write(agent_name="tester", entry="verbatim", topic="t")
+        assert result["success"] is False
+        assert "is held by PID 999" in result["error"]
+        # Assert against the daemon's constant, not a literal: the two are a
+        # wire contract, and drift silently un-fixes #2014 (the daemon would
+        # stop recognising the refusal and dead-letter the job again).
+        assert result.get("error_class") == daemon.LOCK_REFUSAL_ERROR_CLASS
+
     def test_mcp_idle_timeout_invalid_env_disables_watchdog(self, monkeypatch):
         """Invalid MEMPALACE_MCP_IDLE_HOURS disables idle auto-exit."""
         from mempalace import mcp_server

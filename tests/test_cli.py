@@ -665,6 +665,54 @@ def test_cmd_mine_daemon_background_submits_job(mock_config_cls, capsys):
 
 
 @patch("mempalace.cli.MempalaceConfig")
+def test_cmd_mine_daemon_lock_deferral_reports_a_runnable_command(mock_config_cls, capsys):
+    """A foreground mine refused the palace lock must say so and hand back a
+    command that actually works. --palace is global, so it has to be echoed back
+    ahead of the subcommand: without it the suggestion silently lists the
+    default palace's queue instead of the one the job is parked in."""
+    mock_config_cls.return_value.palace_path = "/fake/palace"
+    parked = {
+        "id": "job-1",
+        "state": "queued",
+        "error": {
+            "error_class": "LockHeldByOtherProcess",
+            "message": "palace /my palace is held by PID 999",
+        },
+    }
+    args = argparse.Namespace(
+        dir="/src",
+        palace="/my palace",  # non-default, and with a space to pin the quoting
+        mode="projects",
+        wing=None,
+        agent="mempalace",
+        limit=0,
+        dry_run=False,
+        no_gitignore=False,
+        include_ignored=None,
+        extract="exchange",
+        daemon=True,
+        background=False,
+        backend=None,
+        global_backend=None,
+        max_chunks_per_file=None,
+        redetect_origin=False,
+    )
+    with patch("mempalace.daemon.submit_job", return_value=parked) as mock_submit:
+        with pytest.raises(SystemExit) as exc:
+            cmd_mine(args)
+
+    assert exc.value.code == 1
+    assert mock_submit.call_args.kwargs["stop_on_lock_deferral"] is True
+    err = capsys.readouterr().err
+    assert "is held by PID 999" in err  # the holder, not a generic failure
+    assert "daemon submission failed" not in err  # the submission did not fail
+    assert f"mempalace --palace {shlex.quote('/my palace')} daemon jobs" in err
+    # Not `daemon wait`: this branch exists because we would not wait out the
+    # holder, so it must not hand back a command that does exactly that.
+    assert "daemon wait" not in err
+
+
+@patch("mempalace.cli.MempalaceConfig")
 def test_cmd_mine_background_requires_daemon(mock_config_cls, capsys):
     mock_config_cls.return_value.palace_path = "/fake/palace"
     args = argparse.Namespace(

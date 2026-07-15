@@ -505,6 +505,54 @@ def test_save_diary_direct_daemon_opt_in_submits_job(tmp_path):
     assert (tmp_path / "last_checkpoint").exists()
 
 
+def test_save_diary_daemon_lock_deferral_does_not_stall_the_hook(tmp_path):
+    """A refused job is deferred, not failed (#2014), so it is never terminal
+    while the holder lives.
+
+    This path waits on purpose -- a real diary write takes its time -- but it
+    waits for a state that a parked job cannot reach. Without
+    stop_on_lock_deferral it burns its whole 30s timeout on every session stop
+    and then reports a submission failure that never happened: the entry is
+    queued and the daemon files it once the lock frees."""
+    transcript = tmp_path / "t.jsonl"
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"message {i}"}} for i in range(3)],
+    )
+    env = {"MEMPALACE_HOOKS_DAEMON": "yes", "MEMPALACE_PALACE_PATH": str(palace_dir)}
+    parked = {
+        "id": "job-parked",
+        "state": "queued",
+        "error": {
+            "error_class": "LockHeldByOtherProcess",
+            "message": "palace /p is held by PID 999 (mempalace-mcp)",
+        },
+        "result": None,
+    }
+
+    with patch.dict("os.environ", env):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.hooks_cli._daemon_available", return_value=True):
+                with patch("mempalace.daemon.submit_job", return_value=parked) as mock_submit:
+                    with patch("mempalace.hooks_cli._log") as mock_log:
+                        result = _save_diary_direct(
+                            str(transcript), "sess1", wing="wing_project", agent_name="claude"
+                        )
+
+    # The hook must ask the daemon to hand a parked job straight back.
+    assert mock_submit.call_args.kwargs["stop_on_lock_deferral"] is True
+
+    assert result["count"] == 0  # nothing filed yet -- the daemon still owes the write
+    assert not (tmp_path / "last_checkpoint").exists()  # and it must not be acked
+
+    logged = " ".join(str(c.args[0]) for c in mock_log.call_args_list)
+    assert "deferred" in logged
+    assert "PID 999" in logged
+    assert "Daemon diary checkpoint failed" not in logged, "a parked job is not a failure"
+
+
 def test_hooks_daemon_enabled_requires_explicit_true():
     with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
         assert _hooks_daemon_enabled() is False
@@ -971,6 +1019,40 @@ def test_mine_sync_with_env_uses_projects_mode(tmp_path):
                 mock_run.assert_called_once()
                 cmd = mock_run.call_args[0][0]
                 assert cmd[cmd.index("--mode") + 1] == "projects"
+
+
+def test_mine_sync_daemon_lock_deferral_is_not_reported_as_a_failure(tmp_path):
+    """The precompact sync path waits (wait=True, timeout=60) but is documented as
+    living under the harness 30s ceiling, so a job it can never see go terminal is
+    doubly bad here: without stop_on_lock_deferral it burns past the ceiling and
+    then logs a failure for work the daemon still holds and will run."""
+    mempal_dir = tmp_path / "project"
+    mempal_dir.mkdir()
+    parked = {
+        "id": "job-parked",
+        "state": "queued",
+        "error": {
+            "error_class": "LockHeldByOtherProcess",
+            "message": "palace /p is held by PID 999 (mempalace-mcp)",
+        },
+        "result": None,
+    }
+    env = {"MEMPAL_DIR": str(mempal_dir), "MEMPALACE_HOOKS_DAEMON": "yes"}
+    with patch.dict("os.environ", env):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.hooks_cli._daemon_available", return_value=True):
+                with patch("mempalace.daemon.submit_job", return_value=parked) as mock_submit:
+                    with patch("mempalace.hooks_cli._log") as mock_log:
+                        with patch("mempalace.hooks_cli.subprocess.run") as mock_run:
+                            _mine_sync()
+
+    assert mock_submit.call_args.kwargs["stop_on_lock_deferral"] is True
+    mock_run.assert_not_called()  # the daemon owns it; spawning a mine would double-write
+
+    logged = " ".join(str(c.args[0]) for c in mock_log.call_args_list)
+    assert "deferred" in logged
+    assert "PID 999" in logged
+    assert "Daemon sync mine failed" not in logged, "a parked job is not a failure"
 
 
 def test_mine_sync_uses_mempalace_python(tmp_path):

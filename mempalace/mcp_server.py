@@ -2800,6 +2800,7 @@ def tool_mine(
     mining — use ``mempalace_sync`` for that.
     """
     global _metadata_cache
+    from .daemon import LOCK_REFUSAL_ERROR_CLASS
     from .palace import MineAlreadyRunning, MineValidationError
 
     if not _config.palace_path:
@@ -2862,7 +2863,7 @@ def tool_mine(
             return {
                 "success": False,
                 "error": f"another mine is in progress: {exc}",
-                "error_class": "LockHeldByOtherProcess",
+                "error_class": LOCK_REFUSAL_ERROR_CLASS,
             }
         except MineValidationError as exc:
             return {
@@ -3072,6 +3073,7 @@ def tool_delete_by_source(source_file: str, dry_run: bool = True):
 def tool_sync(project_dir: str = None, wing: str = None, apply: bool = False):
     """Prune drawers whose source files are gitignored, missing, or moved (#1252)."""
     global _metadata_cache
+    from .daemon import LOCK_REFUSAL_ERROR_CLASS
     from .palace import MineAlreadyRunning
     from .sync import sync_palace
 
@@ -3096,7 +3098,7 @@ def tool_sync(project_dir: str = None, wing: str = None, apply: bool = False):
             return {
                 "success": False,
                 "error": f"another mine is in progress: {exc}",
-                "error_class": "LockHeldByOtherProcess",
+                "error_class": LOCK_REFUSAL_ERROR_CLASS,
             }
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
@@ -3498,6 +3500,9 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     that diary reads are case-insensitive (see #1243). "Claude",
     "claude", and "CLAUDE" all resolve to the same agent.
     """
+    from .daemon import LOCK_REFUSAL_ERROR_CLASS
+    from .palace import MineAlreadyRunning
+
     try:
         agent_name = sanitize_name(agent_name, "agent_name").lower()
         entry = sanitize_content(entry)
@@ -3605,6 +3610,21 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
             "timestamp": now.isoformat(),
             "chunks": len(chunk_ids),
             "chunk_ids": chunk_ids,
+        }
+    except MineAlreadyRunning as e:
+        # Order matters: this typed handler precedes the bare Exception below,
+        # mirroring tool_mine / tool_sync. The lock wraps ``col.add`` itself, so
+        # a peer holding it means no entry was filed -- a refusal, not a write
+        # failure -- and the daemon defers such a job rather than dead-lettering
+        # it (#2014). Swallowed into the generic branch the refusal loses
+        # ``error_class``, becomes indistinguishable from a genuine write error,
+        # and the queued diary entry is dropped. The daemon's constant, not a
+        # literal: the two sides are a wire contract, and drift on either end
+        # silently un-fixes #2014.
+        return {
+            "success": False,
+            "error": f"another mine is in progress: {e}",
+            "error_class": LOCK_REFUSAL_ERROR_CLASS,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
