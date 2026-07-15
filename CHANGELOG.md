@@ -56,6 +56,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Mining and configuration correctness.** Oversized files produce a visible stderr warning, `~` in configured palace paths expands consistently, wing slugs handle special characters, and Windows background daemon / synchronous hook mines use `CREATE_NO_WINDOW`. (#923, #1852, #1857, #1863, #1865)
 
+- **`mempalace init` handles non-ASCII `.gitignore` files on Windows.** The project-file ignore guard now reads and appends UTF-8 explicitly instead of relying on locale defaults such as GBK. (#1648)
+
+- **L1 wake-up surfaces the latest moments.** Drawers with equal importance are now ordered by `filed_at` recency rather than insertion order, so startup context prefers recent memories instead of the oldest ones. (#1630)
+
 - **Backend detection requires a SQLite magic header** before classifying a target as Chroma or `sqlite_exact`, preventing unrelated files from being mistaken for a palace. (#1893, #1896)
 
 ### Documentation
