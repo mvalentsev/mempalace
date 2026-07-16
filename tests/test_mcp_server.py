@@ -2005,7 +2005,7 @@ class TestWriteTools:
         ``checkpoint`` label, so the filing agent survives in provenance."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _client.close()  # release file handles; a bare del leaks them on Windows (#1128)
         from mempalace.mcp_server import tool_checkpoint
 
         result = tool_checkpoint(
@@ -2015,8 +2015,10 @@ class TestWriteTools:
         assert len(result["added"]) == 1
 
         client, col = _get_collection(palace_path)
-        metas = col.get(include=["metadatas"])["metadatas"]
-        client.close()
+        try:
+            metas = col.get(include=["metadatas"])["metadatas"]
+        finally:
+            client.close()
         drawers = [m for m in metas if m.get("room") == "decisions"]
         assert len(drawers) == 1
         # Verbatim case, not the lowercased diary-index form of agent_name.
