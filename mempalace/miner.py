@@ -633,13 +633,19 @@ def chunk_text(
         raise ValueError(f"chunk_size must be a positive int, got {chunk_size!r}")
     if not isinstance(chunk_overlap, int) or chunk_overlap < 0:
         raise ValueError(f"chunk_overlap must be a non-negative int, got {chunk_overlap!r}")
-    if chunk_overlap >= chunk_size:
-        # ``start = end - chunk_overlap`` would not advance (or would go
-        # backward) when overlap >= size, producing an infinite loop on
-        # any non-empty input.
+    if chunk_overlap > chunk_size // 2:
+        # The windowing loop pulls ``end`` back to a boundary only when that
+        # boundary is past ``start + chunk_size // 2`` (the rfind guards below),
+        # so a pulled chunk always spans more than ``chunk_size // 2`` chars.
+        # ``start = end - chunk_overlap`` therefore advances only while
+        # ``chunk_overlap <= chunk_size // 2``; a larger overlap makes ``start``
+        # stall or move backward and the loop spins forever on short-line
+        # content (#2056). The largest safe value is ``chunk_size // 2`` (half,
+        # rounded down for odd sizes), which still advances and stays allowed.
         raise ValueError(
-            f"chunk_overlap ({chunk_overlap}) must be less than chunk_size "
-            f"({chunk_size}); equality or greater would loop forever"
+            f"chunk_overlap ({chunk_overlap}) must be at most chunk_size // 2 "
+            f"({chunk_size // 2}); a larger overlap can loop forever on "
+            f"short-line content (#2056)"
         )
     if not isinstance(min_chunk_size, int) or min_chunk_size < 0:
         raise ValueError(f"min_chunk_size must be a non-negative int, got {min_chunk_size!r}")
