@@ -659,6 +659,28 @@ def chunk_text(
     start = 0
     chunk_index = 0
 
+    # Running newline tallies for the 1-indexed (line_start, line_end)
+    # locators emitted below. These replace the previous per-chunk
+    # ``content.count("\n", 0, pos)`` full-prefix rescans, which were O(pos)
+    # each and O(N*K) over K chunks: a 287 MB / ~433k-chunk file scanned
+    # ~1.2e14 bytes and ran for days, indistinguishable from a hang (#2054).
+    # ``start`` and ``end`` each advance monotonically for any
+    # ``chunk_overlap < chunk_size // 2`` (the default 800/100 config and
+    # every sane override), so counting only the newly-scanned span is O(N)
+    # total. Each position sequence keeps its own anchor; a backward step
+    # (a paragraph-boundary pull under a pathological near-``chunk_size``
+    # overlap, or a negative index) falls back to the exact full-prefix
+    # count. That fallback is defensive and does not fire on a terminating
+    # mine: the current windowing cannot send a filed chunk's ``start``
+    # backward without also entering a pre-existing infinite loop (overlap
+    # >= chunk_size // 2), so the else-branches read as uncovered. They keep
+    # every value byte-identical to the old form if the windowing ever gains
+    # a loop guard that admits backward steps.
+    _nl_before_start = 0
+    _start_anchor = 0
+    _nl_before_end = 0
+    _end_anchor = 0
+
     while start < len(content):
         end = min(start + chunk_size, len(content))
 
@@ -677,13 +699,25 @@ def chunk_text(
             # Tier 6a — 1-indexed line range in the stripped source.
             # Approximate locator (±1 at boundaries is fine for "jump to
             # roughly here"); exact-quote positioning is a future tier.
-            # Use the bounds form of ``str.count`` (counts on the original
-            # string with start/end limits) instead of slicing — slicing
-            # would allocate a new substring per chunk and produce O(N^2)
-            # work on a 500MB file with 50K chunks. Per PR #1579 review
-            # (gemini-code-assist, medium priority).
-            line_start = content.count("\n", 0, start) + 1
-            line_end = content.count("\n", 0, end) + 1
+            # ``str.count`` with bounds (not slicing) still avoids allocating
+            # a substring per chunk, the original PR #1579 review concern
+            # (gemini-code-assist, medium priority). The incremental anchors
+            # additionally avoid rescanning the whole prefix each time, the
+            # actual O(N*K) cost (#2054). Two anchors because ``start`` and
+            # ``end`` are distinct monotonic sequences; a backward step
+            # re-derives the value exactly from position 0.
+            if start >= _start_anchor:
+                _nl_before_start += content.count("\n", _start_anchor, start)
+                _start_anchor = start
+                line_start = _nl_before_start + 1
+            else:
+                line_start = content.count("\n", 0, start) + 1
+            if end >= _end_anchor:
+                _nl_before_end += content.count("\n", _end_anchor, end)
+                _end_anchor = end
+                line_end = _nl_before_end + 1
+            else:
+                line_end = content.count("\n", 0, end) + 1
             chunks.append(
                 {
                     "content": chunk,
