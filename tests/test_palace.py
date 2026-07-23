@@ -5,7 +5,11 @@ import chromadb
 from _chroma_palace_helper import make_minimal_chroma_sqlite
 
 from mempalace.backends import CollectionNotInitializedError, PalaceNotFoundError
-from mempalace.palace import _open_collection_or_explain, get_collection
+from mempalace.palace import (
+    _candidate_entity_words,
+    _open_collection_or_explain,
+    get_collection,
+)
 
 
 def _capture():
@@ -185,3 +189,13 @@ def test_open_collection_or_explain_distinguishes_collection_subclass(tmp_path, 
     assert result is None
     assert any("initialized but empty" in line for line in lines)
     assert not any("No palace found" in line for line in lines)
+
+
+def test_candidate_entity_words_drops_overlong_blob():
+    """#2063: a long unbroken ASCII run must be collapsed before matching so the
+    candidate patterns cannot backtrack catastrophically; such runs are never
+    entity names. Normal names are still returned."""
+    longtok = "Aa" + "Bb" * 30  # 62-char unbroken ASCII run
+    words = _candidate_entity_words(longtok + " and Lantern")
+    assert longtok not in words
+    assert "Lantern" in words

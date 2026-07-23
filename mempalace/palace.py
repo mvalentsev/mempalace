@@ -26,7 +26,11 @@ from .backends import (
     resolve_backend_for_palace,
 )
 from .backends.embedding_wrapper import EmbeddingCollection
-from .entity_detector import _apply_known_systems_prepass, _get_coca_filter
+from .entity_detector import (
+    _apply_known_systems_prepass,
+    _collapse_long_ascii_runs,
+    _get_coca_filter,
+)
 
 logger = logging.getLogger("mempalace_mcp")
 
@@ -530,9 +534,12 @@ def _candidate_entity_words(text: str) -> list:
             except re.error:
                 continue
         _CANDIDATE_RX_CACHE = rxs
+    # Defuse ReDoS on long ASCII blobs before matching (#2063); see
+    # entity_detector._collapse_long_ascii_runs.
+    stripped = _collapse_long_ascii_runs(text)
     words = []
     for rx in _CANDIDATE_RX_CACHE:
-        words.extend(rx.findall(text))
+        words.extend(rx.findall(stripped))
     return words
 
 
